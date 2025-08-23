@@ -1,0 +1,12 @@
+Flask
+requests
+beautifulsoup4
+selenium
+chromedriver-autoinstaller
+yt-dlp
+instaloader
+snscrape
+pytube
+tiktok-downloader
+python-telegram-bot==20.7
+python-dotenv
