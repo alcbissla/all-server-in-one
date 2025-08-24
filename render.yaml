@@ -1,14 +1,58 @@
 services:
   - type: web
-    name: all-in-one-flask
+    name: video-downloader-web
     env: python
     plan: free
-    buildCommand: pip install -r requirements.txt
+    buildCommand: |
+      pip install -r requirements.txt
     startCommand: python main.py
+    envVars:
+      - key: TELEGRAM_BOT_TOKEN
+        fromDatabase: true
+      - key: TELEGRAM_CHAT_ID
+        fromDatabase: true
+      - key: TIKTOK_API
+        fromDatabase: true
+      - key: FACEBOOK_API
+        fromDatabase: true
+      - key: TWITTER_API
+        fromDatabase: true
+      - key: AUTO_CLEANUP_HOURS
+        value: "12"
+      - key: PORT
+        value: "10000"
+      - key: INSTAGRAM_SESSIONID
+        fromDatabase: true
+      - key: TWITTER_COOKIES
+        fromDatabase: true
+      - key: FACEBOOK_CUSER
+        fromDatabase: true
+      - key: FACEBOOK_XS
+        fromDatabase: true
 
   - type: worker
-    name: all-in-one-bot
+    name: video-downloader-bot
     env: python
     plan: free
-    buildCommand: pip install -r requirements.txt
+    buildCommand: |
+      pip install -r requirements.txt
     startCommand: python bot.py
+    envVars:
+      - key: TELEGRAM_BOT_TOKEN
+        fromDatabase: true
+      - key: TELEGRAM_CHAT_ID
+        fromDatabase: true
+      - key: TIKTOK_API
+        fromDatabase: true
+      - key: FACEBOOK_API
+        fromDatabase: true
+      - key: TWITTER_API
+        fromDatabase: true
+      - key: INSTAGRAM_SESSIONID
+        fromDatabase: true
+      - key: TWITTER_COOKIES
+        fromDatabase: true
+      - key: FACEBOOK_CUSER
+        fromDatabase: true
+      - key: FACEBOOK_XS
+        fromDatabase: true
