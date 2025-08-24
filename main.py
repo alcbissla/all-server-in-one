@@ -124,27 +124,18 @@ if(prefersDark){document.documentElement.setAttribute('data-theme','dark');}
 
 # ================= UTIL =================
 def _get_loop_from_context(context: ContextTypes.DEFAULT_TYPE):
-    try:
-        return asyncio.get_running_loop()
-    except RuntimeError:
-        pass
-    try:
-        return asyncio.get_event_loop()
-    except RuntimeError:
-        pass
+    try: return asyncio.get_running_loop()
+    except RuntimeError: pass
+    try: return asyncio.get_event_loop()
+    except RuntimeError: pass
     return getattr(getattr(context, "application", None), "loop", None) or getattr(getattr(context, "application", None), "_loop", None)
 
-
 def safe_edit_message(context: ContextTypes.DEFAULT_TYPE, chat_id: int, message_id: int, text: str):
-    if not context:
-        return
+    if not context: return
     try:
         loop = _get_loop_from_context(context)
         if loop and loop.is_running():
-            asyncio.run_coroutine_threadsafe(
-                context.bot.edit_message_text(chat_id=chat_id, message_id=message_id, text=text),
-                loop
-            )
+            asyncio.run_coroutine_threadsafe(context.bot.edit_message_text(chat_id=chat_id, message_id=message_id, text=text), loop)
         else:
             asyncio.run(context.bot.edit_message_text(chat_id=chat_id, message_id=message_id, text=text))
     except Exception as e:
@@ -159,10 +150,8 @@ def cleanup_old_files():
             if os.path.isfile(path):
                 mtime = os.path.getmtime(path)
                 if now - datetime.fromtimestamp(mtime) > timedelta(hours=AUTO_CLEANUP_HOURS):
-                    try:
-                        os.remove(path)
-                    except Exception:
-                        pass
+                    try: os.remove(path)
+                    except: pass
         time.sleep(3600)
 
 # ================= STREAM DOWNLOAD =================
@@ -173,8 +162,7 @@ def stream_download(file_url, filename, context=None, chat_id=None, message=None
     start_time = time.time()
     with open(filename, "wb") as f:
         for chunk in resp.iter_content(chunk_size=256*1024):
-            if not chunk:
-                continue
+            if not chunk: continue
             f.write(chunk)
             downloaded += len(chunk)
             if context and chat_id and message and total > 0:
@@ -189,15 +177,14 @@ def stream_download(file_url, filename, context=None, chat_id=None, message=None
 
 # ================= DOWNLOAD VIDEO =================
 def download_video(url, context=None, chat_id=None, message=None):
-    # yt-dlp with cookies for Instagram/Twitter/Facebook
     try:
         def progress_hook(d):
             if d.get("status") == "downloading" and context and chat_id and message:
                 percent = d.get("_percent_str","").strip()
                 speed = d.get("_speed_str","").strip()
                 eta = d.get("_eta_str","")
-                safe_edit_message(context, chat_id, message.message_id,
-                                  f"⬇️ Downloading...\nProgress: {percent}\nSpeed: {speed}\nETA: {eta}")
+                safe_edit_message(context, chat_id, message.message_id, f"⬇️ Downloading...\nProgress: {percent}\nSpeed: {speed}\nETA: {eta}")
+        
         ydl_opts = {
             "format": "bestvideo+bestaudio/best",
             "outtmpl": "downloads/%(id)s.%(ext)s",
@@ -206,19 +193,18 @@ def download_video(url, context=None, chat_id=None, message=None):
             "merge_output_format": "mp4",
             "progress_hooks": [progress_hook],
         }
-        # Instagram cookies
+
+        # cookies
         if "instagram.com" in url and IG_SESSIONID:
             with tempfile.NamedTemporaryFile("w+", delete=False) as f:
                 f.write(f"# Netscape HTTP Cookie File\n.instagram.com\tTRUE\t/\tFALSE\t2147483647\tsessionid\t{IG_SESSIONID}")
                 f.flush()
                 ydl_opts["cookiefile"] = f.name
-        # Facebook cookies
         if "facebook.com" in url and FB_COOKIES:
             with tempfile.NamedTemporaryFile("w+", delete=False) as f:
                 f.write(FB_COOKIES)
                 f.flush()
                 ydl_opts["cookiefile"] = f.name
-        # Twitter cookies
         if "twitter.com" in url and TW_COOKIES:
             with tempfile.NamedTemporaryFile("w+", delete=False) as f:
                 f.write(TW_COOKIES)
@@ -331,5 +317,12 @@ async def run_bot():
 if __name__=="__main__":
     threading.Thread(target=cleanup_old_files, daemon=True).start()
     threading.Thread(target=lambda: app.run(host="0.0.0.0", port=PORT, debug=False, use_reloader=False), daemon=True).start()
-    
-    asyncio.run(run_bot())
+
+    def telegram_thread():
+        import asyncio
+        asyncio.run(run_bot())
+
+    threading.Thread(target=telegram_thread, daemon=True).start()
+
+    while True:
+        time.sleep(3600)
