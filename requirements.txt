@@ -9,3 +9,4 @@ snscrape
 ffmpeg-python
 beautifulsoup4
 certifi
+telegram
