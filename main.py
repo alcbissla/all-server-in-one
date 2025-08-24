@@ -24,7 +24,7 @@ AUTO_CLEANUP_HOURS = int(os.getenv("AUTO_CLEANUP_HOURS", "12"))
 BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", None)
 PORT = int(os.getenv("PORT", "10000"))
-TIKTOK_API = os.getenv("TIKTOK_API", "")
+TIKTOK_API = os.getenv("TIKTOK_API", "https://www.tikwm.com/api/?url=")
 FACEBOOK_API = os.getenv("FACEBOOK_API", "")
 TWITTER_API = os.getenv("TWITTER_API", "")
 IG_SESSIONID = os.getenv("INSTAGRAM_SESSIONID", "").strip()
@@ -318,17 +318,18 @@ async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
         try: await msg.edit_text(f"❌ Failed: {e}")
         except: pass
 
-def run_telegram_bot():
+async def run_bot():
     if not BOT_TOKEN:
         print("No TELEGRAM_BOT_TOKEN set, skipping Telegram bot.")
         return
     app_bot = Application.builder().token(BOT_TOKEN).build()
     app_bot.add_handler(CommandHandler("start", start))
     app_bot.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_link))
-    app_bot.run_polling()
+    await app_bot.run_polling()
 
 # ================= MAIN =================
 if __name__=="__main__":
     threading.Thread(target=cleanup_old_files, daemon=True).start()
     threading.Thread(target=lambda: app.run(host="0.0.0.0", port=PORT, debug=False, use_reloader=False), daemon=True).start()
-    run_telegram_bot()
+    
+    asyncio.run(run_bot())
