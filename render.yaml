@@ -1,56 +1,36 @@
 services:
   - type: web
-    name: video-downloader-web
+    name: all-downloader-web
     env: python
-    plan: free
     buildCommand: pip install -r requirements.txt
     startCommand: python main.py
     envVars:
-      - key: TELEGRAM_BOT_TOKEN
-        fromDatabase: true
-      - key: TELEGRAM_CHAT_ID
-        fromDatabase: true
-      - key: TIKTOK_API
-        fromDatabase: true
-      - key: FACEBOOK_API
-        fromDatabase: true
-      - key: TWITTER_API
-        fromDatabase: true
-      - key: INSTAGRAM_SESSIONID
-        fromDatabase: true
-      - key: TWITTER_COOKIES
-        fromDatabase: true
-      - key: FACEBOOK_CUSER
-        fromDatabase: true
-      - key: FACEBOOK_XS
-        fromDatabase: true
-      - key: AUTO_CLEANUP_HOURS
-        value: "12"
       - key: PORT
-        value: "10000"
+        value: 10000
+      - key: INSTAGRAM_SESSIONID
+        value: "<your_instagram_sessionid>"
+      - key: FACEBOOK_CUSER
+        value: "<your_facebook_cuser>"
+      - key: FACEBOOK_XS
+        value: "<your_facebook_xs>"
+      - key: TWITTER_COOKIES
+        value: "<your_twitter_cookies>"
 
   - type: worker
-    name: video-downloader-bot
+    name: telegram-bot
     env: python
-    plan: free
     buildCommand: pip install -r requirements.txt
     startCommand: python bot.py
     envVars:
       - key: TELEGRAM_BOT_TOKEN
-        fromDatabase: true
+        value: "<your_bot_token>"
       - key: TELEGRAM_CHAT_ID
-        fromDatabase: true
-      - key: TIKTOK_API
-        fromDatabase: true
-      - key: FACEBOOK_API
-        fromDatabase: true
-      - key: TWITTER_API
-        fromDatabase: true
+        value: "<your_chat_id>"
       - key: INSTAGRAM_SESSIONID
-        fromDatabase: true
-      - key: TWITTER_COOKIES
-        fromDatabase: true
+        value: "<your_instagram_sessionid>"
       - key: FACEBOOK_CUSER
-        fromDatabase: true
+        value: "<your_facebook_cuser>"
       - key: FACEBOOK_XS
-        fromDatabase: true
+        value: "<your_facebook_xs>"
+      - key: TWITTER_COOKIES
+        value: "<your_twitter_cookies>"
