@@ -3,8 +3,7 @@ services:
     name: video-downloader-web
     env: python
     plan: free
-    buildCommand: |
-      pip install -r requirements.txt
+    buildCommand: pip install -r requirements.txt
     startCommand: python main.py
     envVars:
       - key: TELEGRAM_BOT_TOKEN
@@ -17,10 +16,6 @@ services:
         fromDatabase: true
       - key: TWITTER_API
         fromDatabase: true
-      - key: AUTO_CLEANUP_HOURS
-        value: "12"
-      - key: PORT
-        value: "10000"
       - key: INSTAGRAM_SESSIONID
         fromDatabase: true
       - key: TWITTER_COOKIES
@@ -29,13 +24,16 @@ services:
         fromDatabase: true
       - key: FACEBOOK_XS
         fromDatabase: true
+      - key: AUTO_CLEANUP_HOURS
+        value: "12"
+      - key: PORT
+        value: "10000"
 
   - type: worker
     name: video-downloader-bot
     env: python
     plan: free
-    buildCommand: |
-      pip install -r requirements.txt
+    buildCommand: pip install -r requirements.txt
     startCommand: python bot.py
     envVars:
       - key: TELEGRAM_BOT_TOKEN
