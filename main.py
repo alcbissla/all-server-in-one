@@ -7,27 +7,31 @@ from datetime import datetime, timedelta
 import tempfile
 import certifi
 import requests
+
 from flask import Flask, request, render_template_string, send_file, abort
 from dotenv import load_dotenv
-load_dotenv()
-
 import yt_dlp
 from pytube import YouTube
+
+load_dotenv()
 
 # ================= CONFIG =================
 AUTO_CLEANUP_HOURS = int(os.getenv("AUTO_CLEANUP_HOURS", "12"))
 PORT = int(os.getenv("PORT", "10000"))
+
 TIKTOK_API = os.getenv("TIKTOK_API", "https://www.tikwm.com/api/?url=")
-FACEBOOK_COOKIES = f"CUSER={os.getenv('FACEBOOK_CUSER')}; XS={os.getenv('FACEBOOK_XS')}"
-TW_COOKIES = os.getenv("TWITTER_COOKIES", "").strip()
+FACEBOOK_API = os.getenv("FACEBOOK_API", "")
+TWITTER_API = os.getenv("TWITTER_API", "")
 IG_SESSIONID = os.getenv("INSTAGRAM_SESSIONID", "").strip()
+FB_COOKIES = os.getenv("FACEBOOK_CUSER", "").strip()
+FB_XS = os.getenv("FACEBOOK_XS", "").strip()
+TW_COOKIES = os.getenv("TWITTER_COOKIES", "").strip()
 
 app = Flask(__name__)
 os.makedirs("downloads", exist_ok=True)
 
-# ================= HTML TEMPLATE =================
-HTML_TEMPLATE = """ 
-<!DOCTYPE html>
+# ================= HTML =================
+HTML_TEMPLATE = """<!DOCTYPE html>
 <html lang="en" data-theme="light">
 <head>
 <meta charset="UTF-8">
@@ -49,17 +53,9 @@ video{width:100%;border-radius:16px;max-height:400px}
 input[type="text"]{width:100%;padding:14px 18px;font-size:1rem;border-radius:12px;border:2px solid var(--accent);background-color:var(--card);color:var(--text)}
 button{background-color:var(--accent);color:white;font-weight:bold;padding:14px 22px;font-size:1rem;border-radius:12px;border:none;cursor:pointer;display:flex;align-items:center;gap:6px;transition:background-color .3s}
 button:hover{background-color:#2563eb}
-.ads-container{display:flex;flex-wrap:wrap;justify-content:center;gap:20px;padding:2rem 1rem;width:100%;box-sizing:border-box}
-.ad-box{background-color:var(--card);color:var(--text);padding:20px;border-radius:16px;box-shadow:0 4px 12px rgba(0,0,0,.1);width:280px;text-align:center;transition:transform .2s ease}
-.ad-box:hover{transform:translateY(-5px)}
-footer{margin-top:auto;padding:1.5rem;text-align:center}
-.social-icons a{margin:0 10px;display:inline-block}
-.social-icons img{width:32px;height:32px;transition:transform .3s}
-.social-icons img:hover{transform:scale(1.1)}
 .error-msg{margin-top:1rem;color:#e53e3e;font-weight:700;text-align:center}
 .video-title{margin-top:1rem;font-weight:700;font-size:1.25rem;color:var(--text)}
 .hashtags{margin-top:.25rem;color:var(--accent);font-weight:600}
-@media(min-width:768px){.form-box{flex-direction:row}input[type="text"]{flex:1}button{flex-shrink:0}}
 </style>
 </head>
 <body>
@@ -83,37 +79,23 @@ Your browser does not support the video tag.
 </video>
 <div class="video-title">{{ title }}</div>
 <div class="hashtags">{{ hashtags or "No hashtags found" }}</div>
-
 <div style="display:flex;justify-content:center;margin-top:1rem;">
 <a href="/video/{{ filename }}" download>
 <button><i class="bi bi-cloud-arrow-down-fill"></i> Download Video</button>
 </a>
 </div>
+</div>
 {% endif %}
-
-<div class="ads-container">
-<div class="ad-box"><h3><i class="bi bi-megaphone-fill"></i> Ad Spot 1</h3><p>Promote your service or product here.</p></div>
-<div class="ad-box"><h3><i class="bi bi-rocket-takeoff-fill"></i> Ad Spot 2</h3><p>Boost visibility and drive more clicks.</p></div>
-</div>
-
-<footer>
-&copy; 2025 Smart Downloader.
-<div class="social-icons">
-<a href="https://t.me/Alcboss112" target="_blank" title="Telegram"><img src="https://upload.wikimedia.org/wikipedia/commons/8/82/Telegram_logo.svg" alt="Telegram"/></a>
-<a href="https://www.facebook.com/Alcboss112" target="_blank" title="Facebook"><img src="https://upload.wikimedia.org/wikipedia/commons/1/1b/Facebook_icon.svg" alt="Facebook"/></a>
-</div>
-</footer>
 
 <script>
 const prefersDark = window.matchMedia('(prefers-color-scheme: dark)').matches;
 if(prefersDark){document.documentElement.setAttribute('data-theme','dark');}
 </script>
-
 </body>
 </html>
 """
 
-# ================= AUTO CLEANUP =================
+# ================= UTIL =================
 def cleanup_old_files():
     while True:
         now = datetime.now()
@@ -124,7 +106,6 @@ def cleanup_old_files():
                 except: pass
         time.sleep(3600)
 
-# ================= STREAM DOWNLOAD =================
 def stream_download(file_url, filename):
     resp = requests.get(file_url, stream=True, timeout=30, verify=certifi.where())
     with open(filename, "wb") as f:
@@ -134,80 +115,87 @@ def stream_download(file_url, filename):
 
 # ================= DOWNLOAD VIDEO =================
 def download_video(url):
-    try:
-        ydl_opts = {"format":"bestvideo+bestaudio/best","outtmpl":"downloads/%(id)s.%(ext)s","quiet":True,"noplaylist":True,"merge_output_format":"mp4"}
-        # Instagram
-        if "instagram.com" in url and IG_SESSIONID:
-            with tempfile.NamedTemporaryFile("w+", delete=False) as f:
-                f.write(f"# Netscape HTTP Cookie File\n.instagram.com\tTRUE\t/\tFALSE\t2147483647\tsessionid\t{IG_SESSIONID}")
-                f.flush(); ydl_opts["cookiefile"] = f.name
-        # Facebook
-        if "facebook.com" in url and FACEBOOK_COOKIES:
-            with tempfile.NamedTemporaryFile("w+", delete=False) as f:
-                f.write(FACEBOOK_COOKIES); f.flush(); ydl_opts["cookiefile"] = f.name
-        # Twitter
-        if "twitter.com" in url and TW_COOKIES:
-            with tempfile.NamedTemporaryFile("w+", delete=False) as f:
-                f.write(TW_COOKIES); f.flush(); ydl_opts["cookiefile"] = f.name
+    ydl_opts = {"format":"bestvideo+bestaudio/best", "outtmpl":"downloads/%(id)s.%(ext)s", "merge_output_format":"mp4","quiet":True,"noplaylist":True}
+    
+    # Instagram cookies
+    if "instagram.com" in url and IG_SESSIONID:
+        with tempfile.NamedTemporaryFile("w+", delete=False) as f:
+            f.write(f"# Netscape HTTP Cookie File\n.instagram.com\tTRUE\t/\tFALSE\t2147483647\tsessionid\t{IG_SESSIONID}")
+            f.flush()
+            ydl_opts["cookiefile"] = f.name
+    # Facebook cookies
+    if "facebook.com" in url and FB_COOKIES and FB_XS:
+        with tempfile.NamedTemporaryFile("w+", delete=False) as f:
+            f.write(f"c_user={FB_COOKIES}\nxs={FB_XS}")
+            f.flush()
+            ydl_opts["cookiefile"] = f.name
+    # Twitter cookies
+    if "twitter.com" in url and TW_COOKIES:
+        with tempfile.NamedTemporaryFile("w+", delete=False) as f:
+            f.write(TW_COOKIES)
+            f.flush()
+            ydl_opts["cookiefile"] = f.name
 
+    try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(url, download=True)
             filename = ydl.prepare_filename(info)
             if not filename.endswith(".mp4"):
-                alt = os.path.splitext(filename)[0] + ".mp4"
-                if os.path.exists(alt): filename = alt
+                filename = os.path.splitext(filename)[0] + ".mp4"
             return info, filename
-    except:
-        pass
-
-    # TikTok API fallback
+    except Exception as e:
+        print("yt-dlp failed:", e)
+    
+    # Fallback TikTok API
     if "tiktok.com" in url and TIKTOK_API:
         try:
             resp = requests.get(f"{TIKTOK_API}{url}", timeout=15, verify=certifi.where()).json()
-            if resp.get("code") == 0:
+            if resp.get("code")==0:
                 video_url = resp["data"]["play"]
                 filename = f"downloads/{uuid4()}.mp4"
-                return {"title": resp["data"].get("title","TikTok Video")}, stream_download(video_url, filename)
-        except:
-            pass
-
-    # YouTube fallback
+                return {"title":resp['data'].get("title","TikTok Video")}, stream_download(video_url, filename)
+        except: pass
+    
+    # Fallback YouTube
     if "youtube.com" in url or "youtu.be" in url:
         try:
+            from pytube import YouTube
             yt = YouTube(url)
             stream = yt.streams.get_highest_resolution()
             filename = f"downloads/{uuid4()}.mp4"
             stream.download(filename=filename)
-            return {"title": yt.title}, filename
-        except:
-            pass
+            return {"title":yt.title}, filename
+        except: pass
 
     raise Exception("All download methods failed")
 
-# ================= FLASK ROUTES =================
+# ================= FLASK =================
 @app.route("/", methods=["GET","POST"])
 def index():
-    title, hashtags, filename, error = None, None, None, None
+    filename = None
+    title = None
+    hashtags = None
+    error = None
     if request.method=="POST":
-        url = request.form["url"].strip()
-        if not re.match(r"^https?://", url): error="❌ Invalid URL."
+        url = request.form.get("url","").strip()
+        if not re.match(r"^https?://", url):
+            error="❌ Invalid URL."
         else:
             try:
                 info, filename = download_video(url)
                 title = info.get("title","No Title") if isinstance(info, dict) else getattr(info,"title","No Title")
-                tags = info.get("tags") or info.get("categories") or [] if isinstance(info, dict) else []
-                hashtags = " ".join(f"#{tag}" for tag in (tags or [])[:5])
+                tags = info.get("tags",[]) if isinstance(info, dict) else []
+                hashtags = " ".join(f"#{t}" for t in tags[:5])
             except Exception as e:
                 error=f"❌ Error: {e}"
-    return render_template_string(HTML_TEMPLATE, title=title, hashtags=hashtags, filename=os.path.basename(filename) if filename else None, error=error)
+    return render_template_string(HTML_TEMPLATE, filename=os.path.basename(filename) if filename else None, title=title, hashtags=hashtags, error=error)
 
 @app.route("/video/<path:filename>")
 def serve_video(filename):
-    path = os.path.join("downloads", os.path.basename(filename))
-    if not os.path.exists(path): abort(404)
-    return send_file(path, as_attachment=False)
+    safe_path = os.path.join("downloads", os.path.basename(filename))
+    if not os.path.exists(safe_path): abort(404)
+    return send_file(safe_path, as_attachment=False)
 
-# ================= MAIN =================
 if __name__=="__main__":
     threading.Thread(target=cleanup_old_files, daemon=True).start()
     app.run(host="0.0.0.0", port=PORT)
