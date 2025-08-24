@@ -8,4 +8,5 @@ python-dotenv
 snscrape
 ffmpeg-python
 beautifulsoup4
+telegram
 certifi
