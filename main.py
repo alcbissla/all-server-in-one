@@ -1,24 +1,35 @@
 import os
 import re
 import time
+import asyncio
 import requests
 import threading
 from uuid import uuid4
 from datetime import datetime, timedelta
+import tempfile
+import certifi
 
-from flask import Flask, request, render_template_string, send_file
+from dotenv import load_dotenv
+load_dotenv()
+
+from flask import Flask, request, render_template_string, send_file, abort
 import yt_dlp
 from pytube import YouTube
 import instaloader
-import snscrape.modules.twitter as sntwitter
-
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 
 # ================= CONFIG =================
-AUTO_CLEANUP_HOURS = 12
-BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "YOUR_TELEGRAM_BOT_TOKEN")
+AUTO_CLEANUP_HOURS = int(os.getenv("AUTO_CLEANUP_HOURS", "12"))
+BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", None)
+PORT = int(os.getenv("PORT", "10000"))
+TIKTOK_API = os.getenv("TIKTOK_API", "")
+FACEBOOK_API = os.getenv("FACEBOOK_API", "")
+TWITTER_API = os.getenv("TWITTER_API", "")
+IG_SESSIONID = os.getenv("INSTAGRAM_SESSIONID", "").strip()
+FB_COOKIES = os.getenv("FACEBOOK_COOKIES", "").strip()
+TW_COOKIES = os.getenv("TWITTER_COOKIES", "").strip()
 
 app = Flask(__name__)
 os.makedirs("downloads", exist_ok=True)
@@ -52,7 +63,7 @@ button:hover{background-color:#2563eb}
 .ad-box:hover{transform:translateY(-5px)}
 footer{margin-top:auto;padding:1.5rem;text-align:center}
 .social-icons a{margin:0 10px;display:inline-block}
-.social-icons img{width:32px;height:32px;transition:transform .3s ease}
+.social-icons img{width:32px;height:32px;transition:transform .3s}
 .social-icons img:hover{transform:scale(1.1)}
 .error-msg{margin-top:1rem;color:#e53e3e;font-weight:700;text-align:center}
 .video-title{margin-top:1rem;font-weight:700;font-size:1.25rem;color:var(--text)}
@@ -111,6 +122,34 @@ if(prefersDark){document.documentElement.setAttribute('data-theme','dark');}
 </html>
 """
 
+# ================= UTIL =================
+def _get_loop_from_context(context: ContextTypes.DEFAULT_TYPE):
+    try:
+        return asyncio.get_running_loop()
+    except RuntimeError:
+        pass
+    try:
+        return asyncio.get_event_loop()
+    except RuntimeError:
+        pass
+    return getattr(getattr(context, "application", None), "loop", None) or getattr(getattr(context, "application", None), "_loop", None)
+
+
+def safe_edit_message(context: ContextTypes.DEFAULT_TYPE, chat_id: int, message_id: int, text: str):
+    if not context:
+        return
+    try:
+        loop = _get_loop_from_context(context)
+        if loop and loop.is_running():
+            asyncio.run_coroutine_threadsafe(
+                context.bot.edit_message_text(chat_id=chat_id, message_id=message_id, text=text),
+                loop
+            )
+        else:
+            asyncio.run(context.bot.edit_message_text(chat_id=chat_id, message_id=message_id, text=text))
+    except Exception as e:
+        print(f"[safe_edit_message] Failed: {e}")
+
 # ================= AUTO CLEANUP =================
 def cleanup_old_files():
     while True:
@@ -118,187 +157,178 @@ def cleanup_old_files():
         for f in os.listdir("downloads"):
             path = os.path.join("downloads", f)
             if os.path.isfile(path):
-                mtime = datetime.fromtimestamp(os.path.getmtime(path))
-                if now - mtime > timedelta(hours=AUTO_CLEANUP_HOURS):
-                    os.remove(path)
-        time.sleep(3600)
-
-
-# ================= GENERIC STREAM DOWNLOAD WITH PROGRESS =================
-def stream_download(file_url, filename, context=None, chat_id=None, message=None):
-    resp = requests.get(file_url, stream=True)
-    total = int(resp.headers.get("content-length", 0))
-    downloaded = 0
-    start_time = time.time()
-
-    with open(filename, "wb") as f:
-        for chunk in resp.iter_content(chunk_size=256*1024):
-            if chunk:
-                f.write(chunk)
-                downloaded += len(chunk)
-
-                if context and chat_id and message and total > 0:
-                    percent = (downloaded / total) * 100
-                    elapsed = time.time() - start_time
-                    speed = (downloaded / 1024 / 1024) / elapsed
-                    eta = (total - downloaded) / (downloaded / elapsed) if downloaded else 0
-                    eta_str = time.strftime("%M:%S", time.gmtime(eta))
-                    text = f"⬇️ Downloading...\nProgress: {percent:.1f}%\nSpeed: {speed:.2f} MB/s\nETA: {eta_str}"
+                mtime = os.path.getmtime(path)
+                if now - datetime.fromtimestamp(mtime) > timedelta(hours=AUTO_CLEANUP_HOURS):
                     try:
-                        context.bot.edit_message_text(chat_id=chat_id, message_id=message.message_id, text=text)
+                        os.remove(path)
                     except Exception:
                         pass
+        time.sleep(3600)
+
+# ================= STREAM DOWNLOAD =================
+def stream_download(file_url, filename, context=None, chat_id=None, message=None):
+    resp = requests.get(file_url, stream=True, timeout=30, verify=certifi.where())
+    total = int(resp.headers.get("content-length", 0) or 0)
+    downloaded = 0
+    start_time = time.time()
+    with open(filename, "wb") as f:
+        for chunk in resp.iter_content(chunk_size=256*1024):
+            if not chunk:
+                continue
+            f.write(chunk)
+            downloaded += len(chunk)
+            if context and chat_id and message and total > 0:
+                percent = (downloaded / total) * 100
+                elapsed = max(time.time() - start_time, 1e-6)
+                speed = (downloaded / 1024 / 1024) / elapsed
+                eta = (total - downloaded) / (downloaded / elapsed) if downloaded else 0
+                eta_str = time.strftime("%M:%S", time.gmtime(eta))
+                text = f"⬇️ Downloading...\nProgress: {percent:.1f}%\nSpeed: {speed:.2f} MB/s\nETA: {eta_str}"
+                safe_edit_message(context, chat_id, message.message_id, text)
     return filename
 
-
-# ================= UNIFIED DOWNLOAD VIDEO =================
+# ================= DOWNLOAD VIDEO =================
 def download_video(url, context=None, chat_id=None, message=None):
+    # yt-dlp with cookies for Instagram/Twitter/Facebook
     try:
-        # TikTok
-        if "tiktok.com" in url:
-            api = f"https://www.tikwm.com/api/?url={url}"
-            resp = requests.get(api).json()
-            if resp["code"] != 0:
-                raise Exception("TikTok API failed")
-            video_url = resp["data"]["play"]
-            filename = f"downloads/{uuid4()}.mp4"
-            return {"title": resp["data"]["title"], "tags": resp["data"].get("tags", [])}, \
-                   stream_download(video_url, filename, context, chat_id, message)
-
-        # Instagram
-        if "instagram.com" in url:
-            L = instaloader.Instaloader(dirname_pattern="downloads", download_videos=True, save_metadata=False)
-            shortcode = url.split("/")[-2]
-            post = instaloader.Post.from_shortcode(L.context, shortcode)
-            filename = f"downloads/{shortcode}.mp4"
-            if context and chat_id and message:
-                context.bot.edit_message_text(chat_id=chat_id, message_id=message.message_id, text="⏳ Downloading Instagram...")
-            L.download_post(post, target="downloads")
-            return {"title": post.title or "Instagram Video"}, filename
-
-        # Twitter/X
-        if "twitter.com" in url or "x.com" in url:
-            tweet_id = url.split("/")[-1].split("?")[0]
-            for tweet in sntwitter.TwitterTweetScraper(tweet_id).get_items():
-                media_url = tweet.media[0].variants[-1].url
-                filename = f"downloads/{uuid4()}.mp4"
-                return {"title": tweet.content[:50]}, \
-                       stream_download(media_url, filename, context, chat_id, message)
-            raise Exception("No media found in tweet")
-
-        # YouTube / Facebook / others via yt-dlp
         def progress_hook(d):
-            if d['status'] == 'downloading' and context and chat_id and message:
-                percent = d.get('_percent_str', '').strip()
-                speed = d.get('_speed_str', '').strip()
-                eta = d.get('_eta_str', '')
-                text = f"⬇️ Downloading...\nProgress: {percent}\nSpeed: {speed}\nETA: {eta}"
-                try:
-                    context.bot.edit_message_text(chat_id=chat_id, message_id=message.message_id, text=text)
-                except Exception:
-                    pass
-            elif d['status'] == 'finished' and context and chat_id and message:
-                try:
-                    context.bot.edit_message_text(chat_id=chat_id, message_id=message.message_id, text="📦 Processing...")
-                except Exception:
-                    pass
-
+            if d.get("status") == "downloading" and context and chat_id and message:
+                percent = d.get("_percent_str","").strip()
+                speed = d.get("_speed_str","").strip()
+                eta = d.get("_eta_str","")
+                safe_edit_message(context, chat_id, message.message_id,
+                                  f"⬇️ Downloading...\nProgress: {percent}\nSpeed: {speed}\nETA: {eta}")
         ydl_opts = {
-            "format": "mp4",
+            "format": "bestvideo+bestaudio/best",
             "outtmpl": "downloads/%(id)s.%(ext)s",
             "quiet": True,
             "noplaylist": True,
+            "merge_output_format": "mp4",
             "progress_hooks": [progress_hook],
         }
+        # Instagram cookies
+        if "instagram.com" in url and IG_SESSIONID:
+            with tempfile.NamedTemporaryFile("w+", delete=False) as f:
+                f.write(f"# Netscape HTTP Cookie File\n.instagram.com\tTRUE\t/\tFALSE\t2147483647\tsessionid\t{IG_SESSIONID}")
+                f.flush()
+                ydl_opts["cookiefile"] = f.name
+        # Facebook cookies
+        if "facebook.com" in url and FB_COOKIES:
+            with tempfile.NamedTemporaryFile("w+", delete=False) as f:
+                f.write(FB_COOKIES)
+                f.flush()
+                ydl_opts["cookiefile"] = f.name
+        # Twitter cookies
+        if "twitter.com" in url and TW_COOKIES:
+            with tempfile.NamedTemporaryFile("w+", delete=False) as f:
+                f.write(TW_COOKIES)
+                f.flush()
+                ydl_opts["cookiefile"] = f.name
+
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(url, download=True)
             filename = ydl.prepare_filename(info)
+            if not filename.endswith(".mp4"):
+                base, _ = os.path.splitext(filename)
+                alt = base + ".mp4"
+                if os.path.exists(alt):
+                    filename = alt
             return info, filename
-
     except Exception as e:
-        # Fallback YouTube via pytube
+        print("yt-dlp failed:", e)
+
+    # Fallback TikTok API
+    if "tiktok.com" in url and TIKTOK_API:
+        try:
+            resp = requests.get(f"{TIKTOK_API}{url}", timeout=15, verify=certifi.where()).json()
+            if resp.get("code") == 0:
+                video_url = resp["data"]["play"]
+                filename = f"downloads/{uuid4()}.mp4"
+                meta = {"title": resp["data"].get("title", "TikTok Video")}
+                return meta, stream_download(video_url, filename, context, chat_id, message)
+        except:
+            pass
+
+    # Fallback pytube for YouTube
+    try:
         if "youtube.com" in url or "youtu.be" in url:
             yt = YouTube(url)
-            if context and chat_id and message:
-                def on_progress(stream, chunk, bytes_remaining):
-                    total = stream.filesize
-                    downloaded = total - bytes_remaining
-                    percent = (downloaded / total) * 100
-                    elapsed = time.time() - start_time
-                    speed = (downloaded / 1024 / 1024) / elapsed
-                    eta = (total - downloaded) / (downloaded / elapsed) if downloaded else 0
-                    eta_str = time.strftime("%M:%S", time.gmtime(eta))
-                    text = f"⬇️ Downloading...\nProgress: {percent:.1f}%\nSpeed: {speed:.2f} MB/s\nETA: {eta_str}"
-                    try:
-                        context.bot.edit_message_text(chat_id=chat_id, message_id=message.message_id, text=text)
-                    except Exception:
-                        pass
-
-                yt.register_on_progress_callback(on_progress)
-                start_time = time.time()
             stream = yt.streams.get_highest_resolution()
             filename = f"downloads/{uuid4()}.mp4"
             stream.download(filename=filename)
             return {"title": yt.title}, filename
-        else:
-            raise e
+    except:
+        pass
 
+    raise Exception("All download methods failed")
 
-# ================= FLASK ROUTES =================
-@app.route("/", methods=["GET", "POST"])
+# ================= FLASK =================
+@app.route("/", methods=["GET","POST"])
 def index():
     title = None
     hashtags = None
     filename = None
     error = None
-
-    if request.method == "POST":
+    if request.method=="POST":
         url = request.form["url"].strip()
         if not re.match(r"^https?://", url):
-            error = "❌ Invalid URL. Please enter a proper video link."
+            error="❌ Invalid URL. Please enter a proper video link."
         else:
             try:
                 info, filename = download_video(url)
-                title = info.get("title", "No Title")
-                hashtags = " ".join(f"#{tag}" for tag in info.get("tags", [])[:5])
+                if isinstance(info, dict):
+                    title = info.get("title","No Title")
+                    tags = info.get("tags") or info.get("categories") or []
+                else:
+                    title = getattr(info,"title","No Title")
+                    tags = []
+                hashtags = " ".join(f"#{tag}" for tag in (tags or [])[:5])
             except Exception as e:
-                error = f"❌ Error: {str(e)}"
+                error=f"❌ Error: {e}"
+    return render_template_string(HTML_TEMPLATE, title=title, hashtags=hashtags,
+                                  filename=os.path.basename(filename) if filename else None,
+                                  error=error)
 
-    return render_template_string(HTML_TEMPLATE, title=title, hashtags=hashtags, filename=filename, error=error)
-
-
-@app.route("/video/<filename>")
+@app.route("/video/<path:filename>")
 def serve_video(filename):
-    return send_file(f"downloads/{filename}", as_attachment=False)
+    safe_path = os.path.join("downloads", os.path.basename(filename))
+    if not os.path.exists(safe_path):
+        abort(404)
+    return send_file(safe_path, as_attachment=False)
 
-
-# ================= TELEGRAM BOT =================
+# ================= TELEGRAM =================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("Send me a video link to download.")
 
-
 async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    url = update.message.text.strip()
+    url = (update.message.text or "").strip()
+    if not re.match(r"^https?://", url):
+        await update.message.reply_text("❌ Please send a valid link.")
+        return
     msg = await update.message.reply_text("⏳ Starting download...")
     try:
         info, file_path = download_video(url, context, update.message.chat_id, msg)
-        caption = f"{info.get('title','Video')}"
-        with open(file_path, "rb") as f:
+        caption = info.get('title','Video') if isinstance(info, dict) else getattr(info,'title','Video')
+        with open(file_path,"rb") as f:
             await context.bot.send_video(chat_id=update.message.chat_id, video=f, caption=caption)
-        os.remove(file_path)
+        try: os.remove(file_path)
+        except: pass
+        safe_edit_message(context, update.message.chat_id, msg.message_id, "✅ Done.")
     except Exception as e:
-        await msg.edit_text(f"❌ Failed: {e}")
-
+        try: await msg.edit_text(f"❌ Failed: {e}")
+        except: pass
 
 def run_telegram_bot():
+    if not BOT_TOKEN:
+        print("No TELEGRAM_BOT_TOKEN set, skipping Telegram bot.")
+        return
     app_bot = Application.builder().token(BOT_TOKEN).build()
     app_bot.add_handler(CommandHandler("start", start))
     app_bot.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_link))
     app_bot.run_polling()
 
-
-# ================= MAIN START =================
-if __name__ == "__main__":
+# ================= MAIN =================
+if __name__=="__main__":
     threading.Thread(target=cleanup_old_files, daemon=True).start()
-    threading.Thread(target=lambda: app.run(host="0.0.0.0", port=10000), daemon=True).start()
+    threading.Thread(target=lambda: app.run(host="0.0.0.0", port=PORT, debug=False, use_reloader=False), daemon=True).start()
     run_telegram_bot()
