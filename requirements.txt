@@ -1,12 +1,9 @@
 Flask
 requests
 yt-dlp
-instaloader
 pytube
 python-telegram-bot==20.7
 python-dotenv
-snscrape
 ffmpeg-python
 beautifulsoup4
 certifi
-telegram
