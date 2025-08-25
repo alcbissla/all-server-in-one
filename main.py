@@ -125,33 +125,6 @@ if(prefersDark){document.documentElement.setAttribute('data-theme','dark');}
 </html>
 """
 
-# ================= UTIL =================
-def _get_loop_from_context(context: ContextTypes.DEFAULT_TYPE):
-    try:
-        return asyncio.get_running_loop()
-    except RuntimeError:
-        pass
-    try:
-        return asyncio.get_event_loop()
-    except RuntimeError:
-        pass
-    return getattr(getattr(context, "application", None), "loop", None) or getattr(getattr(context, "application", None), "_loop", None)
-
-def safe_edit_message(context: ContextTypes.DEFAULT_TYPE, chat_id: int, message_id: int, text: str):
-    if not context:
-        return
-    try:
-        loop = _get_loop_from_context(context)
-        if loop and loop.is_running():
-            asyncio.run_coroutine_threadsafe(
-                context.bot.edit_message_text(chat_id=chat_id, message_id=message_id, text=text),
-                loop
-            )
-        else:
-            asyncio.run(context.bot.edit_message_text(chat_id=chat_id, message_id=message_id, text=text))
-    except Exception as e:
-        print(f"[safe_edit_message] Failed: {e}")
-
 # ================= AUTO CLEANUP =================
 def cleanup_old_files():
     while True:
@@ -168,25 +141,15 @@ def cleanup_old_files():
         time.sleep(3600)
 
 # ================= DOWNLOAD VIDEO =================
-def download_video(url, context=None, chat_id=None, message=None):
+def download_video(url):
     try:
-        def progress_hook(d):
-            if d.get("status") == "downloading" and context and chat_id and message:
-                percent = d.get("_percent_str","").strip()
-                speed = d.get("_speed_str","").strip()
-                eta = d.get("_eta_str","")
-                safe_edit_message(context, chat_id, message.message_id,
-                                  f"⬇️ Downloading...\nProgress: {percent}\nSpeed: {speed}\nETA: {eta}")
-
         ydl_opts = {
             "format": "bestvideo+bestaudio/best",
             "outtmpl": "downloads/%(id)s.%(ext)s",
             "quiet": True,
             "noplaylist": True,
             "merge_output_format": "mp4",
-            "progress_hooks": [progress_hook],
         }
-
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(url, download=True)
             filename = ydl.prepare_filename(info)
@@ -195,7 +158,7 @@ def download_video(url, context=None, chat_id=None, message=None):
                 alt = base + ".mp4"
                 if os.path.exists(alt):
                     filename = alt
-            meta = {"title": info.get("title") or "Video"}
+            meta = {"title": info.get("title") or "Video", "tags": info.get("tags") or []}
             return meta, filename
     except Exception as e:
         print("yt-dlp failed:", e)
@@ -242,7 +205,7 @@ def serve_video(filename):
         abort(404)
     return send_file(safe_path, as_attachment=False)
 
-# ================= TELEGRAM =================
+# ================= TELEGRAM (PTB v21) =================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("Send me a video link to download.")
 
@@ -258,13 +221,13 @@ async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = await update.message.reply_text("⏳ Starting download...")
     file_path = None
     try:
-        info, file_path = download_video(url, context, update.message.chat_id, msg)
+        info, file_path = download_video(url)
         caption = info.get('title','Video')
 
         try:
             with open(file_path, "rb") as f:
                 await context.bot.send_video(chat_id=update.message.chat_id, video=f, caption=caption)
-            safe_edit_message(context, update.message.chat_id, msg.message_id, "✅ Done.")
+            await msg.edit_text("✅ Done.")
         except Exception as e:
             if CHANNEL_ID:
                 try:
@@ -275,7 +238,7 @@ async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         from_chat_id=int(CHANNEL_ID),
                         message_id=sent.message_id
                     )
-                    safe_edit_message(context, update.message.chat_id, msg.message_id, "✅ Done (forwarded).")
+                    await msg.edit_text("✅ Done (forwarded).")
                 except Exception as e2:
                     await msg.edit_text(f"❌ Failed even with channel fallback: {e2}")
             else:
@@ -294,7 +257,7 @@ def run_telegram_bot():
     app_bot = Application.builder().token(BOT_TOKEN).build()
     app_bot.add_handler(CommandHandler("start", start))
     app_bot.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_link))
-    app_bot.run_polling()
+    app_bot.run_polling(close_loop=False)  # important for Python 3.12+
 
 # ================= MAIN =================
 if __name__=="__main__":
