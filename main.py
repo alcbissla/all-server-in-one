@@ -2,23 +2,20 @@ import os
 import re
 import time
 import asyncio
-import requests
 import threading
 from uuid import uuid4
 from datetime import datetime, timedelta
-import tempfile
-import certifi
-
-from dotenv import load_dotenv
-load_dotenv()
 
 from flask import Flask, request, render_template_string, send_file, abort
 import yt_dlp
 from pytube import YouTube
+from dotenv import load_dotenv
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 
 # ================= CONFIG =================
+load_dotenv()
+
 AUTO_CLEANUP_HOURS = int(os.getenv("AUTO_CLEANUP_HOURS", "12"))
 BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
 DEFAULT_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "").strip()
@@ -38,8 +35,7 @@ app = Flask(__name__)
 os.makedirs("downloads", exist_ok=True)
 
 # ================= HTML TEMPLATE =================
-HTML_TEMPLATE = """ 
-<!DOCTYPE html>
+HTML_TEMPLATE = """<!DOCTYPE html>
 <html lang="en" data-theme="light">
 <head>
 <meta charset="UTF-8">
@@ -122,8 +118,18 @@ if(prefersDark){document.documentElement.setAttribute('data-theme','dark');}
 </script>
 
 </body>
-</html>
-"""
+</html>"""  # Keep full HTML as in your code
+
+# ================= UTIL =================
+def safe_edit_message(context: ContextTypes.DEFAULT_TYPE, chat_id: int, message_id: int, text: str):
+    try:
+        loop = asyncio.get_running_loop()
+        asyncio.run_coroutine_threadsafe(
+            context.bot.edit_message_text(chat_id=chat_id, message_id=message_id, text=text),
+            loop
+        )
+    except Exception:
+        pass
 
 # ================= AUTO CLEANUP =================
 def cleanup_old_files():
@@ -146,7 +152,6 @@ def download_video(url):
         ydl_opts = {
             "format": "bestvideo+bestaudio/best",
             "outtmpl": "downloads/%(id)s.%(ext)s",
-            "quiet": True,
             "noplaylist": True,
             "merge_output_format": "mp4",
         }
@@ -158,22 +163,15 @@ def download_video(url):
                 alt = base + ".mp4"
                 if os.path.exists(alt):
                     filename = alt
-            meta = {"title": info.get("title") or "Video", "tags": info.get("tags") or []}
-            return meta, filename
-    except Exception as e:
-        print("yt-dlp failed:", e)
-
-    try:
+            return {"title": info.get("title", "Video")}, filename
+    except:
         if "youtube.com" in url or "youtu.be" in url:
             yt = YouTube(url)
             stream = yt.streams.get_highest_resolution()
             filename = f"downloads/{uuid4()}.mp4"
             stream.download(filename=filename)
             return {"title": yt.title}, filename
-    except Exception as e:
-        print("pytube fallback failed:", e)
-
-    raise Exception("All download methods failed")
+    raise Exception("Download failed")
 
 # ================= FLASK =================
 @app.route("/", methods=["GET","POST"])
@@ -185,16 +183,14 @@ def index():
     if request.method=="POST":
         url = request.form["url"].strip()
         if not re.match(r"^https?://", url):
-            error="❌ Invalid URL. Please enter a proper video link."
+            error="❌ Invalid URL"
         else:
             try:
                 info, filename = download_video(url)
-                title = (info or {}).get("title","No Title")
-                tags = (info or {}).get("tags") or []
-                hashtags = " ".join(f"#{tag}" for tag in tags[:5])
+                title = info.get("title","No Title")
             except Exception as e:
-                error=f"❌ Error: {e}"
-    return render_template_string(HTML_TEMPLATE, title=title, hashtags=hashtags,
+                error=f"❌ {e}"
+    return render_template_string(HTML_TEMPLATE, title=title,
                                   filename=os.path.basename(filename) if filename else None,
                                   error=error)
 
@@ -205,44 +201,35 @@ def serve_video(filename):
         abort(404)
     return send_file(safe_path, as_attachment=False)
 
-# ================= TELEGRAM (PTB v21) =================
+# ================= TELEGRAM =================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("Send me a video link to download.")
 
 async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not update.message or not update.message.text:
-        return
-
     url = update.message.text.strip()
     if not re.match(r"^https?://", url):
-        await update.message.reply_text("❌ Please send a valid link.")
+        await update.message.reply_text("❌ Please send a valid URL.")
         return
 
-    msg = await update.message.reply_text("⏳ Starting download...")
+    msg = await update.message.reply_text("⏳ Downloading...")
     file_path = None
     try:
         info, file_path = download_video(url)
-        caption = info.get('title','Video')
+        caption = info.get("title", "Video")
 
-        try:
-            with open(file_path, "rb") as f:
-                await context.bot.send_video(chat_id=update.message.chat_id, video=f, caption=caption)
+        if CHANNEL_ID:
+            # Upload to channel first
+            with open(file_path,"rb") as f:
+                sent = await context.bot.send_video(chat_id=int(CHANNEL_ID), video=f, caption=caption[:900])
+            # Forward to user
+            await context.bot.forward_message(chat_id=update.message.chat_id,
+                                              from_chat_id=int(CHANNEL_ID),
+                                              message_id=sent.message_id)
+            await msg.edit_text("✅ Done (via channel).")
+        else:
+            with open(file_path,"rb") as f:
+                await context.bot.send_video(chat_id=update.message.chat_id, video=f, caption=caption[:900])
             await msg.edit_text("✅ Done.")
-        except Exception as e:
-            if CHANNEL_ID:
-                try:
-                    with open(file_path, "rb") as f:
-                        sent = await context.bot.send_video(chat_id=int(CHANNEL_ID), video=f, caption=caption)
-                    await context.bot.forward_message(
-                        chat_id=update.message.chat_id,
-                        from_chat_id=int(CHANNEL_ID),
-                        message_id=sent.message_id
-                    )
-                    await msg.edit_text("✅ Done (forwarded).")
-                except Exception as e2:
-                    await msg.edit_text(f"❌ Failed even with channel fallback: {e2}")
-            else:
-                await msg.edit_text(f"❌ Failed: {e}")
     except Exception as e:
         try: await msg.edit_text(f"❌ Failed: {e}")
         except: pass
@@ -252,12 +239,12 @@ async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 def run_telegram_bot():
     if not BOT_TOKEN:
-        print("No TELEGRAM_BOT_TOKEN set, skipping Telegram bot.")
+        print("No bot token set.")
         return
     app_bot = Application.builder().token(BOT_TOKEN).build()
     app_bot.add_handler(CommandHandler("start", start))
     app_bot.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_link))
-    app_bot.run_polling(close_loop=False)  # important for Python 3.12+
+    app_bot.run_polling()
 
 # ================= MAIN =================
 if __name__=="__main__":
