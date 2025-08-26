@@ -1,7 +1,7 @@
-Flask
+flask
 python-dotenv
+pyrogram
+tgcrypto
 yt-dlp
 pytube
-python-telegram-bot
-certifi
 requests
