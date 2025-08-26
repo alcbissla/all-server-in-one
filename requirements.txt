@@ -1,9 +1,7 @@
-Flask
-requests
-yt-dlp
-pytube
-python-telegram-bot==21.6
-python-dotenv
-ffmpeg-python
-beautifulsoup4
-certifi
+Flask==2.3.4
+python-dotenv==1.0.1
+yt-dlp==2025.08.18
+pytube==15.0.0
+python-telegram-bot==20.7
+certifi==2025.7.1
+requests==2.32.1
