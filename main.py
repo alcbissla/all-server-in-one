@@ -1,7 +1,6 @@
 import os
 import re
 import time
-import asyncio
 import threading
 from uuid import uuid4
 from datetime import datetime, timedelta
@@ -10,8 +9,9 @@ from flask import Flask, request, render_template_string, send_file, abort
 import yt_dlp
 from pytube import YouTube
 from dotenv import load_dotenv
+import requests
 from telegram import Update
-from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
+from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, filters, Webhook
 
 # ================= CONFIG =================
 load_dotenv()
@@ -21,6 +21,7 @@ BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
 DEFAULT_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "").strip()
 CHANNEL_ID = os.getenv("TELEGRAM_CHANNEL_ID", "").strip()
 PORT = int(os.getenv("PORT", "10000"))
+WEBHOOK_URL = os.getenv("WEBHOOK_URL", "").strip()
 
 TIKTOK_API = os.getenv("TIKTOK_API", "https://www.tikwm.com/api/?url=").strip()
 FACEBOOK_API = os.getenv("FACEBOOK_API", "").strip()
@@ -34,7 +35,7 @@ FACEBOOK_XS = os.getenv("FACEBOOK_XS", "").strip()
 app = Flask(__name__)
 os.makedirs("downloads", exist_ok=True)
 
-# ================= HTML TEMPLATE =================
+# ================= HTML =================
 HTML_TEMPLATE = """<!DOCTYPE html>
 <html lang="en" data-theme="light">
 <head>
@@ -121,32 +122,17 @@ if(prefersDark){document.documentElement.setAttribute('data-theme','dark');}
 </html>"""  # Keep full HTML as in your code
 
 # ================= UTIL =================
-def safe_edit_message(context: ContextTypes.DEFAULT_TYPE, chat_id: int, message_id: int, text: str):
-    try:
-        loop = asyncio.get_running_loop()
-        asyncio.run_coroutine_threadsafe(
-            context.bot.edit_message_text(chat_id=chat_id, message_id=message_id, text=text),
-            loop
-        )
-    except Exception:
-        pass
-
-# ================= AUTO CLEANUP =================
 def cleanup_old_files():
     while True:
         now = datetime.now()
         for f in os.listdir("downloads"):
             path = os.path.join("downloads", f)
             if os.path.isfile(path):
-                mtime = os.path.getmtime(path)
-                if now - datetime.fromtimestamp(mtime) > timedelta(hours=AUTO_CLEANUP_HOURS):
-                    try:
-                        os.remove(path)
-                    except Exception:
-                        pass
+                if now - datetime.fromtimestamp(os.path.getmtime(path)) > timedelta(hours=AUTO_CLEANUP_HOURS):
+                    try: os.remove(path)
+                    except: pass
         time.sleep(3600)
 
-# ================= DOWNLOAD VIDEO =================
 def download_video(url):
     try:
         ydl_opts = {
@@ -159,11 +145,9 @@ def download_video(url):
             info = ydl.extract_info(url, download=True)
             filename = ydl.prepare_filename(info)
             if not filename.endswith(".mp4"):
-                base, _ = os.path.splitext(filename)
-                alt = base + ".mp4"
-                if os.path.exists(alt):
-                    filename = alt
-            return {"title": info.get("title", "Video")}, filename
+                alt = os.path.splitext(filename)[0] + ".mp4"
+                if os.path.exists(alt): filename = alt
+            return {"title": info.get("title","Video")}, filename
     except:
         if "youtube.com" in url or "youtu.be" in url:
             yt = YouTube(url)
@@ -171,17 +155,25 @@ def download_video(url):
             filename = f"downloads/{uuid4()}.mp4"
             stream.download(filename=filename)
             return {"title": yt.title}, filename
-    raise Exception("Download failed")
+    # Backup APIs
+    try:
+        if "tiktok.com" in url and TIKTOK_API:
+            r = requests.get(TIKTOK_API + url).json()
+            download_url = r.get("data", [{}])[0].get("play")
+            if download_url:
+                fpath = f"downloads/{uuid4()}.mp4"
+                with requests.get(download_url, stream=True) as r2:
+                    with open(fpath, "wb") as f: f.write(r2.content)
+                return {"title":"TikTok Video"}, fpath
+    except: pass
+    raise Exception("All download methods failed")
 
 # ================= FLASK =================
 @app.route("/", methods=["GET","POST"])
 def index():
-    title = None
-    hashtags = None
-    filename = None
-    error = None
+    title = filename = error = None
     if request.method=="POST":
-        url = request.form["url"].strip()
+        url = request.form.get("url","").strip()
         if not re.match(r"^https?://", url):
             error="❌ Invalid URL"
         else:
@@ -197,57 +189,64 @@ def index():
 @app.route("/video/<path:filename>")
 def serve_video(filename):
     safe_path = os.path.join("downloads", os.path.basename(filename))
-    if not os.path.exists(safe_path):
-        abort(404)
+    if not os.path.exists(safe_path): abort(404)
     return send_file(safe_path, as_attachment=False)
 
-# ================= TELEGRAM =================
+# ================= TELEGRAM WEBHOOK =================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("Send me a video link to download.")
 
 async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
     url = update.message.text.strip()
     if not re.match(r"^https?://", url):
-        await update.message.reply_text("❌ Please send a valid URL.")
+        await update.message.reply_text("❌ Invalid URL")
         return
 
     msg = await update.message.reply_text("⏳ Downloading...")
     file_path = None
     try:
         info, file_path = download_video(url)
-        caption = info.get("title", "Video")
+        caption = info.get("title","Video")[:900]
 
         if CHANNEL_ID:
-            # Upload to channel first
             with open(file_path,"rb") as f:
-                sent = await context.bot.send_video(chat_id=int(CHANNEL_ID), video=f, caption=caption[:900])
-            # Forward to user
+                sent = await context.bot.send_video(chat_id=int(CHANNEL_ID), video=f, caption=caption)
             await context.bot.forward_message(chat_id=update.message.chat_id,
                                               from_chat_id=int(CHANNEL_ID),
                                               message_id=sent.message_id)
             await msg.edit_text("✅ Done (via channel).")
         else:
             with open(file_path,"rb") as f:
-                await context.bot.send_video(chat_id=update.message.chat_id, video=f, caption=caption[:900])
+                await context.bot.send_video(chat_id=update.message.chat_id, video=f, caption=caption)
             await msg.edit_text("✅ Done.")
     except Exception as e:
         try: await msg.edit_text(f"❌ Failed: {e}")
         except: pass
     finally:
-        if file_path and os.path.exists(file_path):
-            os.remove(file_path)
+        if file_path and os.path.exists(file_path): os.remove(file_path)
 
-def run_telegram_bot():
-    if not BOT_TOKEN:
-        print("No bot token set.")
-        return
-    app_bot = Application.builder().token(BOT_TOKEN).build()
-    app_bot.add_handler(CommandHandler("start", start))
-    app_bot.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_link))
-    app_bot.run_polling()
+# Webhook route for Telegram
+@app.route(f"/webhook/{BOT_TOKEN}", methods=["POST"])
+async def webhook():
+    update = Update.de_json(request.get_json(force=True), bot)
+    await dispatcher.process_update(update)
+    return "OK"
 
 # ================= MAIN =================
 if __name__=="__main__":
+    # Start cleanup thread
     threading.Thread(target=cleanup_old_files, daemon=True).start()
+
+    # Flask app runs on Render port
     threading.Thread(target=lambda: app.run(host="0.0.0.0", port=PORT, debug=False, use_reloader=False), daemon=True).start()
-    run_telegram_bot()
+
+    # Telegram bot webhook setup
+    bot = Application.builder().token(BOT_TOKEN).build()
+    dispatcher = bot
+
+    bot.add_handler(CommandHandler("start", start))
+    bot.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_link))
+
+    bot.run_webhook(listen="0.0.0.0",
+                    port=PORT,
+                    webhook_url=f"{WEBHOOK_URL}/webhook/{BOT_TOKEN}")
