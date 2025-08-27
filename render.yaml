@@ -1,31 +1,44 @@
 services:
   - type: web
-    name: all-in-one-downloader
+    name: video-downloader
     env: python
+    plan: free
     buildCommand: |
       apt-get update && apt-get install -y ffmpeg
       pip install -r requirements.txt
     startCommand: python main.py
     envVars:
       - key: TELEGRAM_BOT_TOKEN
-        sync: false
+        value: "YOUR_TELEGRAM_BOT_TOKEN"
       - key: TELEGRAM_CHAT_ID
-        sync: false
+        value: "YOUR_DEFAULT_CHAT_ID"
       - key: TELEGRAM_CHANNEL_ID
-        sync: false
+        value: "YOUR_TELEGRAM_CHANNEL_ID"
       - key: TG_API_ID
-        sync: false
+        value: "YOUR_TG_API_ID"
       - key: TG_API_HASH
-        sync: false
+        value: "YOUR_TG_API_HASH"
       - key: TELETHON_BOT_TOKEN
-        sync: false
+        value: "YOUR_TELETHON_BOT_TOKEN"
       - key: TIKTOK_API
-        sync: false
+        value: "https://www.tikwm.com/api/?url="
       - key: FACEBOOK_API
-        sync: false
+        value: "https://myapi-2f5b.onrender.com/fbvideo/search?url="
       - key: TWITTER_API
-        sync: false
+        value: "https://twitsave.com/info?url="
       - key: AUTO_CLEANUP_HOURS
         value: "12"
       - key: PORT
         value: "10000"
+      - key: INSTAGRAM_SESSIONID
+        value: ""
+      - key: FACEBOOK_CUSER
+        value: ""
+      - key: FACEBOOK_XS
+        value: ""
+      - key: TWITTER_AUTH_TOKEN
+        value: ""
+      - key: FACEBOOK_COOKIES
+        value: ""
+      - key: TWITTER_COOKIES
+        value: ""
