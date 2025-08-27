@@ -1,5 +1,4 @@
-import os, re, time, asyncio, requests, threading, logging
-from uuid import uuid4
+import os, re, time, asyncio, logging
 from datetime import datetime, timedelta
 
 from dotenv import load_dotenv
@@ -7,8 +6,6 @@ load_dotenv()
 
 from flask import Flask, request, render_template_string, abort, Response
 import yt_dlp
-from pytube import YouTube
-import instaloader
 
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
@@ -24,10 +21,6 @@ PORT = int(os.getenv("PORT", "10000"))
 API_ID = int(os.getenv("TG_API_ID", "0"))
 API_HASH = os.getenv("TG_API_HASH", "")
 TELETHON_BOT_TOKEN = os.getenv("TELETHON_BOT_TOKEN", "").strip()
-
-TIKTOK_API = os.getenv("TIKTOK_API", "").strip()
-FACEBOOK_API = os.getenv("FACEBOOK_API", "").strip()
-TWITTER_API = os.getenv("TWITTER_API", "").strip()
 
 IG_SESSIONID = os.getenv("INSTAGRAM_SESSIONID", "").strip()
 FACEBOOK_CUSER = os.getenv("FACEBOOK_CUSER", "").strip()
@@ -53,7 +46,30 @@ HTML_TEMPLATE = """<!DOCTYPE html>
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.10.5/font/bootstrap-icons.css">
 <style>
-/* ... keep your full CSS from above ... */
+:root{--bg-light:#f4f4f9;--text-light:#1a1a1a;--bg-dark:#181818;--text-dark:#f5f5f5;--card-light:#fff;--card-dark:#2b2b2b;--accent:#3b82f6}
+[data-theme="light"]{--bg:var(--bg-light);--text:var(--text-light);--card:var(--card-light)}
+[data-theme="dark"]{--bg:var(--bg-dark);--text:var(--text-dark);--card:var(--card-dark)}
+body{margin:0;padding:0;font-family:'Inter',sans-serif;background-color:var(--bg);color:var(--text);display:flex;flex-direction:column;align-items:center;min-height:100vh;transition:background-color .3s,color .3s}
+header{text-align:center;margin-top:2rem}
+header h1{font-size:2.5rem;margin-bottom:.5rem}
+header p{color:var(--accent);font-weight:500}
+.video-preview{margin:2rem auto;width:90%;max-width:720px;border-radius:16px;overflow:hidden;box-shadow:0 10px 25px rgba(0,0,0,.1);text-align:center}
+video{width:100%;border-radius:16px;max-height:400px}
+.form-box{margin-top:1rem;display:flex;flex-direction:column;align-items:center;width:90%;max-width:500px;gap:10px}
+input[type="text"]{width:100%;padding:14px 18px;font-size:1rem;border-radius:12px;border:2px solid var(--accent);background-color:var(--card);color:var(--text)}
+button{background-color:var(--accent);color:white;font-weight:bold;padding:14px 22px;font-size:1rem;border-radius:12px;border:none;cursor:pointer;display:flex;align-items:center;gap:6px;transition:background-color .3s}
+button:hover{background-color:#2563eb}
+.ads-container{display:flex;flex-wrap:wrap;justify-content:center;gap:20px;padding:2rem 1rem;width:100%;box-sizing:border-box}
+.ad-box{background-color:var(--card);color:var(--text);padding:20px;border-radius:16px;box-shadow:0 4px 12px rgba(0,0,0,.1);width:280px;text-align:center;transition:transform .2s ease}
+.ad-box:hover{transform:translateY(-5px)}
+footer{margin-top:auto;padding:1.5rem;text-align:center}
+.social-icons a{margin:0 10px;Display:inline-block}
+.social-icons img{width:32px;height:32px;transition:transform .3s}
+.social-icons img:hover{transform:scale(1.1)}
+.error-msg{margin-top:1rem;color:#e53e3e;font-weight:700;text-align:center}
+.video-title{margin-top:1rem;font-weight:700;font-size:1.25rem;color:var(--text)}
+.hashtags{margin-top:.25rem;color:var(--accent);font-weight:600}
+@media(min-width:768px){.form-box{flex-direction:row}input[type="text"]{flex:1}button{flex-shrink:0}}
 </style>
 </head>
 <body>
@@ -61,11 +77,14 @@ HTML_TEMPLATE = """<!DOCTYPE html>
 <h1><i class="bi bi-download"></i> All-in-One Video Downloader</h1>
 <p>#TikTok #YouTube #Facebook #MP4 #M3U8 #HD</p>
 </header>
+
 <form class="form-box" action="/" method="post">
 <input type="text" name="url" placeholder="Paste your video link here..." required autocomplete="off"/>
 <button type="submit"><i class="bi bi-cloud-arrow-down-fill"></i> Download</button>
 </form>
+
 {% if error %}<p class="error-msg">{{ error }}</p>{% endif %}
+
 {% if filename %}
 <div class="video-preview">
 <video autoplay muted controls playsinline>
@@ -74,16 +93,19 @@ Your browser does not support the video tag.
 </video>
 <div class="video-title">{{ title }}</div>
 <div class="hashtags">{{ hashtags or "No hashtags found" }}</div>
+
 <div style="display:flex;justify-content:center;margin-top:1rem;">
 <a href="/video/{{ filename }}" download>
 <button><i class="bi bi-cloud-arrow-down-fill"></i> Download Video</button>
 </a>
 </div>
 {% endif %}
+
 <div class="ads-container">
 <div class="ad-box"><h3><i class="bi bi-megaphone-fill"></i> Ad Spot 1</h3><p>Promote your service or product here.</p></div>
 <div class="ad-box"><h3><i class="bi bi-rocket-takeoff-fill"></i> Ad Spot 2</h3><p>Boost visibility and drive more clicks.</p></div>
 </div>
+
 <footer>
 &copy; 2025 Smart Downloader.
 <div class="social-icons">
@@ -91,10 +113,12 @@ Your browser does not support the video tag.
 <a href="https://www.facebook.com/Alcboss112" target="_blank" title="Facebook"><img src="https://upload.wikimedia.org/wikipedia/commons/1/1b/Facebook_icon.svg" alt="Facebook"/></a>
 </div>
 </footer>
+
 <script>
 const prefersDark = window.matchMedia('(prefers-color-scheme: dark)').matches;
 if(prefersDark){document.documentElement.setAttribute('data-theme','dark');}
 </script>
+
 </body>
 </html>"""
 
@@ -215,26 +239,22 @@ async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
             except Exception as e:
                 logger.warning("Could not delete %s: %s", file_path, e)
 
-# ---------------- RUN TELEGRAM BOT ASYNC ----------------
-async def run_telegram_bot():
-    app_bot = Application.builder().token(BOT_TOKEN).build()
-    app_bot.add_handler(CommandHandler("start", start_cmd))
-    app_bot.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_link))
-    await app_bot.run_polling()
-
 # ---------------- MAIN ----------------
-if __name__ == "__main__":
+async def main():
     # Start cleanup thread
+    import threading
     threading.Thread(target=cleanup_old_files, daemon=True).start()
-
-    # Start Flask server in a thread
+    # Start Flask server
     threading.Thread(
         target=lambda: app.run(host="0.0.0.0", port=PORT, debug=False, use_reloader=False),
         daemon=True
     ).start()
 
-    # Start Telegram bot (blocking, async-safe)
+    # Start Telegram bot
     app_bot = Application.builder().token(BOT_TOKEN).build()
     app_bot.add_handler(CommandHandler("start", start_cmd))
     app_bot.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_link))
-    app_bot.run_polling()
+    await app_bot.run_polling()
+
+if __name__ == "__main__":
+    asyncio.run(main())
