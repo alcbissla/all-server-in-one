@@ -224,9 +224,17 @@ async def run_telegram_bot():
 
 # ---------------- MAIN ----------------
 if __name__ == "__main__":
+    # Start cleanup thread
     threading.Thread(target=cleanup_old_files, daemon=True).start()
+
+    # Start Flask server in a thread
     threading.Thread(
         target=lambda: app.run(host="0.0.0.0", port=PORT, debug=False, use_reloader=False),
         daemon=True
     ).start()
-    asyncio.run(run_telegram_bot())
+
+    # Start Telegram bot (blocking, async-safe)
+    app_bot = Application.builder().token(BOT_TOKEN).build()
+    app_bot.add_handler(CommandHandler("start", start_cmd))
+    app_bot.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_link))
+    app_bot.run_polling()
