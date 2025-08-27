@@ -1,9 +1,7 @@
-Flask
-requests
-yt-dlp
+Flask==2.3.3
 python-telegram-bot==20.7
-python-dotenv
-pytube
-instaloader
-telethon
-
+telethon==1.31.1
+yt-dlp==2025.08.17
+pytube==15.0.0
+python-dotenv==1.0.1
+requests==2.32.0
