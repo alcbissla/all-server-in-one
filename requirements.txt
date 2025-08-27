@@ -1,7 +1,9 @@
-flask
-python-dotenv
-pyrogram
-tgcrypto
-yt-dlp
-pytube
+Flask
 requests
+yt-dlp
+python-telegram-bot==20.7
+python-dotenv
+pytube
+instaloader
+telethon
+
