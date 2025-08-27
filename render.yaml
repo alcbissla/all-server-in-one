@@ -1,0 +1,31 @@
+services:
+  - type: web
+    name: all-in-one-downloader
+    env: python
+    buildCommand: |
+      apt-get update && apt-get install -y ffmpeg
+      pip install -r requirements.txt
+    startCommand: python main.py
+    envVars:
+      - key: TELEGRAM_BOT_TOKEN
+        sync: false
+      - key: TELEGRAM_CHAT_ID
+        sync: false
+      - key: TELEGRAM_CHANNEL_ID
+        sync: false
+      - key: TG_API_ID
+        sync: false
+      - key: TG_API_HASH
+        sync: false
+      - key: TELETHON_BOT_TOKEN
+        sync: false
+      - key: TIKTOK_API
+        sync: false
+      - key: FACEBOOK_API
+        sync: false
+      - key: TWITTER_API
+        sync: false
+      - key: AUTO_CLEANUP_HOURS
+        value: "12"
+      - key: PORT
+        value: "10000"
