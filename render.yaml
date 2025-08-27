@@ -1,8 +1,0 @@
-services:
-  - type: web
-    name: all-server-in-one
-    env: python
-    plan: free
-    buildCommand: "./start.sh build"
-    startCommand: "./start.sh start"
-    autoDeploy: true
