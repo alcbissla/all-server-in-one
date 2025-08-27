@@ -5,14 +5,14 @@ from datetime import datetime, timedelta
 from dotenv import load_dotenv
 load_dotenv()
 
-from flask import Flask, request, render_template_string, send_file, abort, Response
+from flask import Flask, request, render_template_string, abort, Response
 import yt_dlp
 from pytube import YouTube
 import instaloader
 
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
-from telethon import TelegramClient, events, utils, errors
+from telethon import TelegramClient
 
 # -------- CONFIG ----------
 AUTO_CLEANUP_HOURS = int(os.getenv("AUTO_CLEANUP_HOURS", "12"))
@@ -23,7 +23,7 @@ PORT = int(os.getenv("PORT", "10000"))
 
 API_ID = int(os.getenv("TG_API_ID", "0"))
 API_HASH = os.getenv("TG_API_HASH", "")
-TELETHON_BOT_TOKEN = os.getenv("TELETHON_BOT_TOKEN", "").strip()  # use bot token
+TELETHON_BOT_TOKEN = os.getenv("TELETHON_BOT_TOKEN", "").strip()
 
 TIKTOK_API = os.getenv("TIKTOK_API", "").strip()
 FACEBOOK_API = os.getenv("FACEBOOK_API", "").strip()
@@ -215,20 +215,18 @@ async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
             except Exception as e:
                 logger.warning("Could not delete %s: %s", file_path, e)
 
-def run_telegram_bot():
+# ---------------- RUN TELEGRAM BOT ASYNC ----------------
+async def run_telegram_bot():
     app_bot = Application.builder().token(BOT_TOKEN).build()
     app_bot.add_handler(CommandHandler("start", start_cmd))
     app_bot.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_link))
-    app_bot.run_polling()  # blocking, async-safe
+    await app_bot.run_polling()
 
 # ---------------- MAIN ----------------
 if __name__ == "__main__":
-    # Start cleanup
     threading.Thread(target=cleanup_old_files, daemon=True).start()
-    # Start Flask server
     threading.Thread(
         target=lambda: app.run(host="0.0.0.0", port=PORT, debug=False, use_reloader=False),
         daemon=True
     ).start()
-    # Start Telegram bot
-    run_telegram_bot()
+    asyncio.run(run_telegram_bot())
