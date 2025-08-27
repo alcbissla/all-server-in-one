@@ -23,11 +23,7 @@ PORT = int(os.getenv("PORT", "10000"))
 
 API_ID = int(os.getenv("TG_API_ID", "0"))
 API_HASH = os.getenv("TG_API_HASH", "")
-TELETHON_BOT_TOKEN = os.getenv("TELETHON_BOT_TOKEN", "").strip()  # use bot token to avoid phone login
-
-TIKTOK_API = os.getenv("TIKTOK_API", "").strip()
-FACEBOOK_API = os.getenv("FACEBOOK_API", "").strip()
-TWITTER_API = os.getenv("TWITTER_API", "").strip()
+TELETHON_BOT_TOKEN = os.getenv("TELETHON_BOT_TOKEN", "").strip()
 
 IG_SESSIONID = os.getenv("INSTAGRAM_SESSIONID", "").strip()
 FACEBOOK_CUSER = os.getenv("FACEBOOK_CUSER", "").strip()
@@ -40,7 +36,7 @@ logger = logging.getLogger(__name__)
 app = Flask(__name__)
 os.makedirs("downloads", exist_ok=True)
 
-# Telethon client using BOT TOKEN
+# ---------------- TELETHON CLIENT ----------------
 telethon_client = TelegramClient("telethon", API_ID, API_HASH).start(bot_token=TELETHON_BOT_TOKEN)
 
 # ---------------- HTML TEMPLATE ----------------
@@ -127,7 +123,7 @@ if(prefersDark){document.documentElement.setAttribute('data-theme','dark');}
 </script>
 
 </body>
-</html>"""  # keep your previous HTML template here
+</html>"""
 
 # ---------------- CLEANUP ----------------
 def cleanup_old_files():
@@ -144,7 +140,7 @@ def cleanup_old_files():
                     logger.debug("cleanup error: %s", e)
         time.sleep(3600)
 
-# ---------------- DOWNLOAD (yt-dlp with safe progress) ----------------
+# ---------------- DOWNLOAD ----------------
 def download_video(url, progress_hook=None):
     ydl_opts = {
         "format": "bestvideo+bestaudio/best",
@@ -160,7 +156,7 @@ def download_video(url, progress_hook=None):
             filename = os.path.splitext(filename)[0] + ".mp4"
         return info, filename
 
-# ---------------- FLASK ----------------
+# ---------------- FLASK ROUTES ----------------
 @app.route("/", methods=["GET","POST"])
 def index():
     title = None
@@ -196,7 +192,7 @@ def serve_video(filename):
             logger.warning("Failed to delete %s: %s", path, e)
     return Response(generate(), mimetype="video/mp4")
 
-# ---------------- TELEGRAM BOT ----------------
+# ---------------- TELEGRAM BOT HANDLERS ----------------
 async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("Send me a video link. I’ll download & upload up to 2 GB.")
 
@@ -250,11 +246,15 @@ async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
             except Exception as e:
                 logger.warning("Could not delete %s: %s", file_path, e)
 
-def run_telegram_bot():
+# ---------------- RUN TELEGRAM BOT ASYNC ----------------
+async def run_telegram_bot():
     app_bot = Application.builder().token(BOT_TOKEN).build()
     app_bot.add_handler(CommandHandler("start", start_cmd))
     app_bot.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_link))
-    app_bot.run_polling()
+    await app_bot.initialize()
+    await app_bot.start()
+    await app_bot.updater.start_polling()
+    await app_bot.updater.idle()
 
 # ---------------- MAIN ----------------
 if __name__ == "__main__":
@@ -263,4 +263,4 @@ if __name__ == "__main__":
         target=lambda: app.run(host="0.0.0.0", port=PORT, debug=False, use_reloader=False),
         daemon=True
     ).start()
-    run_telegram_bot()
+    asyncio.run(run_telegram_bot())
