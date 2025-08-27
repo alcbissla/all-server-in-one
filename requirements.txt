@@ -1,8 +1,23 @@
-Flask
-requests
-yt-dlp
-python-telegram-bot==20.7
+# Flask web server
+flask
+
+# Environment loader
 python-dotenv
+
+# Telegram bot framework (async, no Updater issues)
+python-telegram-bot==20.7
+
+# Telethon for uploading to private channels
+telethon==1.34.0
+
+# Video downloaders
+yt-dlp
 pytube
 instaloader
-telethon
+snscrape
+
+# Requests for helper APIs (TikTok, Facebook, Twitter)
+requests
+
+# Async / housekeeping
+aiofiles
