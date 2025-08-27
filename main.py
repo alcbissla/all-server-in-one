@@ -1,11 +1,19 @@
-import os, re, time, asyncio, requests, threading, logging
+import os
+import re
+import time
+import asyncio
+import requests
+import threading
+import logging
+import shutil
+import tempfile
 from uuid import uuid4
 from datetime import datetime, timedelta
 
 from dotenv import load_dotenv
 load_dotenv()
 
-from flask import Flask, request, render_template_string, send_file, abort, Response
+from flask import Flask, request, render_template_string, Response, abort
 import yt_dlp
 import instaloader
 
@@ -94,37 +102,27 @@ footer{margin-top:auto;padding:1.5rem;text-align:center}
 {% if filename %}
 <div class="video-preview">
 <video autoplay muted controls playsinline>
-<source src="/video/{{ filename }}" type="video/mp4"/>
+<source src="/video/{{ uuid }}/{{ filename }}" type="video/mp4"/>
 Your browser does not support the video tag.
 </video>
 <div class="video-title">{{ title }}</div>
 </div>
 
 <div style="display:flex;justify-content:center;margin-top:1rem;">
-<a href="/video/{{ filename }}" download>
+<a href="/video/{{ uuid }}/{{ filename }}" download>
 <button><i class="bi bi-cloud-arrow-down-fill"></i> Download Video</button>
 </a>
 </div>
 {% endif %}
 
-<div class="ads-container">
-<div class="ad-box"><h3><i class="bi bi-megaphone-fill"></i> Ad Spot 1</h3><p>Promote your service or product here.</p></div>
-<div class="ad-box"><h3><i class="bi bi-rocket-takeoff-fill"></i> Ad Spot 2</h3><p>Boost visibility and drive more clicks.</p></div>
-</div>
-
 <footer>
 &copy; 2025 Smart Downloader.
-<div class="social-icons">
-<a href="https://t.me/Alcboss112" target="_blank"><img src="https://upload.wikimedia.org/wikipedia/commons/8/82/Telegram_logo.svg" alt="Telegram"/></a>
-<a href="https://www.facebook.com/Alcboss112" target="_blank"><img src="https://upload.wikimedia.org/wikipedia/commons/1/1b/Facebook_icon.svg" alt="Facebook"/></a>
-</div>
 </footer>
 
 <script>
 const prefersDark = window.matchMedia('(prefers-color-scheme: dark)').matches;
 if(prefersDark){document.documentElement.setAttribute('data-theme','dark');}
 </script>
-
 </body>
 </html>"""
 
@@ -134,84 +132,45 @@ def cleanup_old_files():
         now = datetime.now()
         for f in os.listdir("downloads"):
             path = os.path.join("downloads", f)
-            if os.path.isfile(path):
+            if os.path.isdir(path):
                 try:
                     if now - datetime.fromtimestamp(os.path.getmtime(path)) > timedelta(hours=AUTO_CLEANUP_HOURS):
-                        os.remove(path)
-                        logger.info("🧹 Removed old file: %s", path)
+                        shutil.rmtree(path)
+                        logger.info("🧹 Removed old folder: %s", path)
                 except Exception as e:
                     logger.debug("cleanup error: %s", e)
         time.sleep(3600)
 
-# ---------------- DOWNLOAD (yt-dlp with API fallback) ----------------
+# ---------------- DOWNLOAD (yt-dlp with ffmpeg for HLS) ----------------
 def download_video(url, progress_hook=None):
+    tmp_dir = tempfile.mkdtemp(dir="downloads")
     try:
         ydl_opts = {
             "format": "bestvideo+bestaudio/best",
-            "outtmpl": "downloads/%(id)s.%(ext)s",
+            "outtmpl": os.path.join(tmp_dir, "%(id)s.%(ext)s"),
             "noplaylist": True,
             "merge_output_format": "mp4",
-            "progress_hooks": [progress_hook] if progress_hook else []
+            "progress_hooks": [progress_hook] if progress_hook else [],
+            "external_downloader": "ffmpeg",
+            "external_downloader_args": ["-hls_use_mpegts", "1"]
         }
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(url, download=True)
             filename = ydl.prepare_filename(info)
             if not filename.endswith(".mp4"):
                 filename = os.path.splitext(filename)[0] + ".mp4"
-            return info, filename
+            return info, filename, tmp_dir
     except Exception as e:
+        shutil.rmtree(tmp_dir)
         logger.warning("yt-dlp failed: %s", e)
-
-        api_url = None
-        if "tiktok.com" in url and TIKTOK_API:
-            api_url = f"{TIKTOK_API}{url}"
-        elif "facebook.com" in url and FACEBOOK_API:
-            api_url = f"{FACEBOOK_API}{url}"
-        elif "twitter.com" in url and TWITTER_API:
-            api_url = f"{TWITTER_API}{url}"
-
-        if not api_url:
-            raise Exception("yt-dlp failed and no fallback API configured")
-
-        try:
-            r = requests.get(api_url, timeout=20)
-            r.raise_for_status()
-            data = r.json()
-
-            if "tiktok" in api_url:
-                video_url = data.get("data", {}).get("play") or data.get("data", {}).get("hdplay")
-                title = data.get("data", {}).get("title", "TikTok Video")
-            elif "facebook" in api_url:
-                video_url = data.get("url") or data.get("download")
-                title = data.get("title", "Facebook Video")
-            elif "twitter" in api_url:
-                video_url = data.get("video", [{}])[0].get("url")
-                title = data.get("desc", "Twitter Video")
-            else:
-                raise Exception("Unsupported API format")
-
-            if not video_url:
-                raise Exception("No video URL from API")
-
-            filename = f"downloads/{uuid4().hex}.mp4"
-            with requests.get(video_url, stream=True, timeout=30) as resp:
-                resp.raise_for_status()
-                with open(filename, "wb") as f:
-                    for chunk in resp.iter_content(1024*1024):
-                        f.write(chunk)
-
-            info = {"title": title, "url": url}
-            return info, filename
-
-        except Exception as api_err:
-            logger.error("Fallback API failed: %s", api_err)
-            raise Exception(f"Download failed: {api_err}")
+        raise e
 
 # ---------------- FLASK ----------------
 @app.route("/", methods=["GET","POST"])
 def index():
     title = None
     filename = None
+    uuid_str = None
     error = None
     if request.method == "POST":
         url = request.form["url"].strip()
@@ -219,25 +178,28 @@ def index():
             error = "❌ Invalid URL"
         else:
             try:
-                info, filename = download_video(url)
+                info, filename, tmp_dir = download_video(url)
                 title = info.get("title", "Video")
+                filename = os.path.basename(filename)
+                uuid_str = os.path.basename(tmp_dir)
             except Exception as e:
                 error = str(e)
     return render_template_string(HTML_TEMPLATE,
                                   title=title,
-                                  filename=os.path.basename(filename) if filename else None,
+                                  filename=filename,
+                                  uuid=uuid_str,
                                   error=error)
 
-@app.route("/video/<path:filename>")
-def serve_video(filename):
-    path = os.path.join("downloads", os.path.basename(filename))
+@app.route("/video/<uuid>/<path:filename>")
+def serve_video(uuid, filename):
+    path = os.path.join("downloads", uuid, os.path.basename(filename))
     if not os.path.exists(path):
         abort(404)
     def generate():
         with open(path, "rb") as f:
             yield from f
         try:
-            os.remove(path)
+            shutil.rmtree(os.path.join("downloads", uuid))
             logger.info("🗑️ Deleted after serve: %s", path)
         except Exception as e:
             logger.warning("Failed to delete %s: %s", path, e)
@@ -252,7 +214,7 @@ async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     url = update.message.text.strip()
     msg = await update.message.reply_text("⏳ Downloading...")
-    file_path = None
+    tmp_dir = None
 
     def download_hook(d):
         if d['status'] == 'downloading':
@@ -266,7 +228,7 @@ async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
 
     try:
-        info, file_path = download_video(url, progress_hook=download_hook)
+        info, file_path, tmp_dir = download_video(url, progress_hook=download_hook)
         caption = info.get("title", "Video")
 
         sent = await telethon_client.send_file(
@@ -288,12 +250,12 @@ async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logger.exception("handle_link error: %s", e)
         await msg.edit_text(f"❌ Failed: {e}")
     finally:
-        if file_path and os.path.exists(file_path):
+        if tmp_dir and os.path.exists(tmp_dir):
             try:
-                os.remove(file_path)
-                logger.info("🗑️ Deleted after Telegram upload: %s", file_path)
+                shutil.rmtree(tmp_dir)
+                logger.info("🗑️ Deleted temp folder: %s", tmp_dir)
             except Exception as e:
-                logger.warning("Could not delete %s: %s", file_path, e)
+                logger.warning("Could not delete %s: %s", tmp_dir, e)
 
 def run_telegram_bot():
     app_bot = Application.builder().token(BOT_TOKEN).build()
