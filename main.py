@@ -1,30 +1,19 @@
-import os
-import re
-import time
-import asyncio
-import requests
-import threading
-import logging
-import shutil
-import tempfile
+import os, re, time, asyncio, requests, threading, logging
 from uuid import uuid4
 from datetime import datetime, timedelta
 
 from dotenv import load_dotenv
 load_dotenv()
 
-from flask import Flask, request, render_template_string, Response, abort
+from flask import Flask, request, render_template_string, abort, Response
 import yt_dlp
-import instaloader
-
+from telethon import TelegramClient
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
-from telethon import TelegramClient
 
 # -------- CONFIG ----------
 AUTO_CLEANUP_HOURS = int(os.getenv("AUTO_CLEANUP_HOURS", "12"))
 BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
-DEFAULT_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "").strip()
 CHANNEL_ID = int(os.getenv("TELEGRAM_CHANNEL_ID", "0"))
 PORT = int(os.getenv("PORT", "10000"))
 
@@ -36,18 +25,15 @@ TIKTOK_API = os.getenv("TIKTOK_API", "").strip()
 FACEBOOK_API = os.getenv("FACEBOOK_API", "").strip()
 TWITTER_API = os.getenv("TWITTER_API", "").strip()
 
-IG_SESSIONID = os.getenv("INSTAGRAM_SESSIONID", "").strip()
-FACEBOOK_CUSER = os.getenv("FACEBOOK_CUSER", "").strip()
-FACEBOOK_XS = os.getenv("FACEBOOK_XS", "").strip()
-TWITTER_AUTH_TOKEN = os.getenv("TWITTER_AUTH_TOKEN", "").strip()
-
+# ---------------- LOGGING ----------------
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+# ---------------- FLASK ----------------
 app = Flask(__name__)
 os.makedirs("downloads", exist_ok=True)
 
-# Telethon client (bot mode)
+# ---------------- TELETHON ----------------
 telethon_client = TelegramClient("telethon", API_ID, API_HASH).start(bot_token=TELETHON_BOT_TOKEN)
 
 # ---------------- HTML TEMPLATE ----------------
@@ -73,16 +59,8 @@ video{width:100%;border-radius:16px;max-height:400px}
 input[type="text"]{width:100%;padding:14px 18px;font-size:1rem;border-radius:12px;border:2px solid var(--accent);background-color:var(--card);color:var(--text)}
 button{background-color:var(--accent);color:white;font-weight:bold;padding:14px 22px;font-size:1rem;border-radius:12px;border:none;cursor:pointer;display:flex;align-items:center;gap:6px;transition:background-color .3s}
 button:hover{background-color:#2563eb}
-.ads-container{display:flex;flex-wrap:wrap;justify-content:center;gap:20px;padding:2rem 1rem;width:100%;box-sizing:border-box}
-.ad-box{background-color:var(--card);color:var(--text);padding:20px;border-radius:16px;box-shadow:0 4px 12px rgba(0,0,0,.1);width:280px;text-align:center;transition:transform .2s ease}
-.ad-box:hover{transform:translateY(-5px)}
-footer{margin-top:auto;padding:1.5rem;text-align:center}
-.social-icons a{margin:0 10px;Display:inline-block}
-.social-icons img{width:32px;height:32px;transition:transform .3s}
-.social-icons img:hover{transform:scale(1.1)}
 .error-msg{margin-top:1rem;color:#e53e3e;font-weight:700;text-align:center}
 .video-title{margin-top:1rem;font-weight:700;font-size:1.25rem;color:var(--text)}
-.hashtags{margin-top:.25rem;color:var(--accent);font-weight:600}
 @media(min-width:768px){.form-box{flex-direction:row}input[type="text"]{flex:1}button{flex-shrink:0}}
 </style>
 </head>
@@ -102,27 +80,24 @@ footer{margin-top:auto;padding:1.5rem;text-align:center}
 {% if filename %}
 <div class="video-preview">
 <video autoplay muted controls playsinline>
-<source src="/video/{{ uuid }}/{{ filename }}" type="video/mp4"/>
+<source src="/video/{{ filename }}" type="video/mp4"/>
 Your browser does not support the video tag.
 </video>
 <div class="video-title">{{ title }}</div>
 </div>
 
 <div style="display:flex;justify-content:center;margin-top:1rem;">
-<a href="/video/{{ uuid }}/{{ filename }}" download>
+<a href="/video/{{ filename }}" download>
 <button><i class="bi bi-cloud-arrow-down-fill"></i> Download Video</button>
 </a>
 </div>
 {% endif %}
 
-<footer>
-&copy; 2025 Smart Downloader.
-</footer>
-
 <script>
 const prefersDark = window.matchMedia('(prefers-color-scheme: dark)').matches;
 if(prefersDark){document.documentElement.setAttribute('data-theme','dark');}
 </script>
+
 </body>
 </html>"""
 
@@ -132,45 +107,87 @@ def cleanup_old_files():
         now = datetime.now()
         for f in os.listdir("downloads"):
             path = os.path.join("downloads", f)
-            if os.path.isdir(path):
+            if os.path.isfile(path):
                 try:
                     if now - datetime.fromtimestamp(os.path.getmtime(path)) > timedelta(hours=AUTO_CLEANUP_HOURS):
-                        shutil.rmtree(path)
-                        logger.info("🧹 Removed old folder: %s", path)
+                        os.remove(path)
+                        logger.info("🧹 Removed old file: %s", path)
                 except Exception as e:
                     logger.debug("cleanup error: %s", e)
         time.sleep(3600)
 
-# ---------------- DOWNLOAD (yt-dlp with ffmpeg for HLS) ----------------
+# ---------------- DOWNLOAD ----------------
 def download_video(url, progress_hook=None):
-    tmp_dir = tempfile.mkdtemp(dir="downloads")
+    """
+    Downloads video using yt-dlp, prefers ffmpeg for HLS streams.
+    """
     try:
         ydl_opts = {
             "format": "bestvideo+bestaudio/best",
-            "outtmpl": os.path.join(tmp_dir, "%(id)s.%(ext)s"),
+            "outtmpl": "downloads/%(id)s.%(ext)s",
             "noplaylist": True,
             "merge_output_format": "mp4",
             "progress_hooks": [progress_hook] if progress_hook else [],
-            "external_downloader": "ffmpeg",
-            "external_downloader_args": ["-hls_use_mpegts", "1"]
+            "hls_prefer_native": False,  # prefer ffmpeg
+            "hls_use_mpegts": True,
+            "postprocessors": [{"key": "FFmpegVideoConvertor", "preferedformat": "mp4"}],
         }
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(url, download=True)
             filename = ydl.prepare_filename(info)
             if not filename.endswith(".mp4"):
                 filename = os.path.splitext(filename)[0] + ".mp4"
-            return info, filename, tmp_dir
+            return info, filename
     except Exception as e:
-        shutil.rmtree(tmp_dir)
         logger.warning("yt-dlp failed: %s", e)
-        raise e
+        # fallback API handling
+        api_url = None
+        if "tiktok.com" in url and TIKTOK_API:
+            api_url = f"{TIKTOK_API}{url}"
+        elif "facebook.com" in url and FACEBOOK_API:
+            api_url = f"{FACEBOOK_API}{url}"
+        elif "twitter.com" in url and TWITTER_API:
+            api_url = f"{TWITTER_API}{url}"
 
-# ---------------- FLASK ----------------
+        if not api_url:
+            raise Exception("yt-dlp failed and no fallback API available")
+
+        try:
+            r = requests.get(api_url, timeout=30)
+            r.raise_for_status()
+            data = r.json()
+            if "tiktok" in api_url:
+                video_url = data.get("data", {}).get("play") or data.get("data", {}).get("hdplay")
+                title = data.get("data", {}).get("title", "TikTok Video")
+            elif "facebook" in api_url:
+                video_url = data.get("url") or data.get("download")
+                title = data.get("title", "Facebook Video")
+            elif "twitter" in api_url:
+                video_url = data.get("video", [{}])[0].get("url")
+                title = data.get("desc", "Twitter Video")
+            else:
+                raise Exception("Unsupported API format")
+
+            if not video_url:
+                raise Exception("No video URL from API")
+
+            filename = f"downloads/{uuid4().hex}.mp4"
+            with requests.get(video_url, stream=True, timeout=30) as resp:
+                resp.raise_for_status()
+                with open(filename, "wb") as f:
+                    for chunk in resp.iter_content(1024*1024):
+                        f.write(chunk)
+            info = {"title": title, "url": url}
+            return info, filename
+        except Exception as api_err:
+            logger.error("Fallback API failed: %s", api_err)
+            raise Exception(f"Download failed: {api_err}")
+
+# ---------------- FLASK ROUTES ----------------
 @app.route("/", methods=["GET","POST"])
 def index():
     title = None
     filename = None
-    uuid_str = None
     error = None
     if request.method == "POST":
         url = request.form["url"].strip()
@@ -178,28 +195,25 @@ def index():
             error = "❌ Invalid URL"
         else:
             try:
-                info, filename, tmp_dir = download_video(url)
+                info, filename = download_video(url)
                 title = info.get("title", "Video")
-                filename = os.path.basename(filename)
-                uuid_str = os.path.basename(tmp_dir)
             except Exception as e:
                 error = str(e)
     return render_template_string(HTML_TEMPLATE,
                                   title=title,
-                                  filename=filename,
-                                  uuid=uuid_str,
+                                  filename=os.path.basename(filename) if filename else None,
                                   error=error)
 
-@app.route("/video/<uuid>/<path:filename>")
-def serve_video(uuid, filename):
-    path = os.path.join("downloads", uuid, os.path.basename(filename))
+@app.route("/video/<path:filename>")
+def serve_video(filename):
+    path = os.path.join("downloads", os.path.basename(filename))
     if not os.path.exists(path):
         abort(404)
     def generate():
         with open(path, "rb") as f:
             yield from f
         try:
-            shutil.rmtree(os.path.join("downloads", uuid))
+            os.remove(path)
             logger.info("🗑️ Deleted after serve: %s", path)
         except Exception as e:
             logger.warning("Failed to delete %s: %s", path, e)
@@ -214,7 +228,7 @@ async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     url = update.message.text.strip()
     msg = await update.message.reply_text("⏳ Downloading...")
-    tmp_dir = None
+    file_path = None
 
     def download_hook(d):
         if d['status'] == 'downloading':
@@ -228,7 +242,7 @@ async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
 
     try:
-        info, file_path, tmp_dir = download_video(url, progress_hook=download_hook)
+        info, file_path = download_video(url, progress_hook=download_hook)
         caption = info.get("title", "Video")
 
         sent = await telethon_client.send_file(
@@ -250,18 +264,22 @@ async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logger.exception("handle_link error: %s", e)
         await msg.edit_text(f"❌ Failed: {e}")
     finally:
-        if tmp_dir and os.path.exists(tmp_dir):
+        if file_path and os.path.exists(file_path):
             try:
-                shutil.rmtree(tmp_dir)
-                logger.info("🗑️ Deleted temp folder: %s", tmp_dir)
+                os.remove(file_path)
+                logger.info("🗑️ Deleted after Telegram upload: %s", file_path)
             except Exception as e:
-                logger.warning("Could not delete %s: %s", tmp_dir, e)
+                logger.warning("Could not delete %s: %s", file_path, e)
 
-def run_telegram_bot():
+# ---------------- TELEGRAM BOT START ----------------
+async def start_bot():
     app_bot = Application.builder().token(BOT_TOKEN).build()
     app_bot.add_handler(CommandHandler("start", start_cmd))
     app_bot.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_link))
-    app_bot.run_polling()
+    await app_bot.initialize()
+    await app_bot.start()
+    await app_bot.updater.start_polling()
+    await app_bot.updater.idle()
 
 # ---------------- MAIN ----------------
 if __name__ == "__main__":
@@ -270,4 +288,4 @@ if __name__ == "__main__":
         target=lambda: app.run(host="0.0.0.0", port=PORT, debug=False, use_reloader=False),
         daemon=True
     ).start()
-    run_telegram_bot()
+    asyncio.run(start_bot())
