@@ -1,4 +1,9 @@
-import os, re, time, asyncio, threading, logging
+import os
+import re
+import time
+import asyncio
+import threading
+import logging
 from datetime import datetime, timedelta
 
 from dotenv import load_dotenv
@@ -30,7 +35,7 @@ API_ID = int(os.getenv("TG_API_ID", "0"))
 API_HASH = os.getenv("TG_API_HASH", "")
 TELETHON_BOT_TOKEN = os.getenv("TELETHON_BOT_TOKEN", "").strip()
 
-# optional helpers (unused in this core file, just loaded to keep parity with your env)
+# optional helpers (unused in core file, kept for parity with .env)
 TIKTOK_API = os.getenv("TIKTOK_API", "").strip()
 FACEBOOK_API = os.getenv("FACEBOOK_API", "").strip()
 TWITTER_API = os.getenv("TWITTER_API", "").strip()
@@ -40,9 +45,9 @@ FACEBOOK_CUSER = os.getenv("FACEBOOK_CUSER", "").strip()
 FACEBOOK_XS = os.getenv("FACEBOOK_XS", "").strip()
 TWITTER_AUTH_TOKEN = os.getenv("TWITTER_AUTH_TOKEN", "").strip()
 
-# Backoff guard to avoid frequent ImportBotAuthorization (FloodWait on rapid restarts)
+# Backoff guard to avoid frequent ImportBotAuthorization (FloodWait on restarts)
 TELETHON_LOGIN_BACKOFF_SECONDS = int(os.getenv("TELETHON_LOGIN_BACKOFF_SECONDS", "600"))
-TELETHON_SESSION_NAME = os.getenv("TELETHON_SESSION_NAME", "telethon")  # persist session file
+TELETHON_SESSION_NAME = os.getenv("TELETHON_SESSION_NAME", "telethon")  # session file name
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -51,7 +56,10 @@ logger = logging.getLogger(__name__)
 app = Flask(__name__)
 os.makedirs("downloads", exist_ok=True)
 
-# ========= HTML (keep your previous template) =========
+# Telethon client instance (not connected yet). Persistent session file name used.
+telethon_client = TelegramClient(TELETHON_SESSION_NAME, API_ID, API_HASH)
+
+# ========= HTML TEMPLATE =========
 HTML_TEMPLATE = """<!DOCTYPE html>
 <html lang="en" data-theme="light">
 <head>
@@ -273,11 +281,15 @@ async def handle_link(telethon_client: TelegramClient, update: Update, context: 
         )
 
         # Forward from channel to the user via Bot API
-        await context.bot.forward_message(
-            chat_id=update.message.chat_id,
-            from_chat_id=CHANNEL_ID,
-            message_id=(await telethon_client.get_messages(CHANNEL_ID, limit=1))[0].id,
-        )
+        # get last message from channel (the one we just uploaded)
+        msgs = await telethon_client.get_messages(CHANNEL_ID, limit=1)
+        if msgs:
+            last_msg_id = msgs[0].id
+            await context.bot.forward_message(
+                chat_id=update.message.chat_id,
+                from_chat_id=CHANNEL_ID,
+                message_id=last_msg_id,
+            )
         await msg.edit_text("✅ Done (uploaded to channel & forwarded).")
 
     except Exception as e:
@@ -296,6 +308,7 @@ async def handle_link(telethon_client: TelegramClient, update: Update, context: 
 
 # ========= RUNNERS =========
 def run_flask():
+    # Use built-in server for simplicity (Render will proxy). This runs in a thread.
     app.run(host="0.0.0.0", port=PORT, debug=False, use_reloader=False)
 
 async def ensure_telethon_bot_session(client: TelegramClient):
@@ -338,26 +351,22 @@ async def ensure_telethon_bot_session(client: TelegramClient):
         logger.exception("Telethon init error: %s", e)
 
 async def run_ptb_and_telethon():
-    # Telethon client (persistent session file)
-    telethon_client = TelegramClient(TELETHON_SESSION_NAME, API_ID, API_HASH)
+    # Ensure Telethon session is ready
     await ensure_telethon_bot_session(telethon_client)
 
-    # PTB application (async-safe; no Updater constructor in sync mode)
+    # PTB Application (v20+). Using run_polling to avoid low-level Updater usage.
     app_bot = Application.builder().token(BOT_TOKEN).build()
 
-    # Handlers (wrap telethon_client into the PTB handler)
+    # Handler wrapper injecting telethon_client
     async def _handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await handle_link(telethon_client, update, context)
 
     app_bot.add_handler(CommandHandler("start", start_cmd))
     app_bot.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, _handle_link))
 
-    # Async lifecycle (prevents __slots__ error)
-    await app_bot.initialize()
-    await app_bot.start()
-    await app_bot.updater.start_polling()
-    # blocks until stop signal
-    await app_bot.updater.idle()
+    # Start PTB polling loop (this will run until termination)
+    # close_loop=False ensures we don't close the outer asyncio loop when PTB finishes.
+    await app_bot.run_polling(close_loop=False)
 
 async def main():
     # Start background maintenance threads
@@ -365,7 +374,18 @@ async def main():
     threading.Thread(target=run_flask, daemon=True).start()
 
     # Run PTB + Telethon in this loop
-    await run_ptb_and_telethon()
+    try:
+        await run_ptb_and_telethon()
+    finally:
+        # Gracefully disconnect Telethon when shutting down
+        try:
+            if telethon_client and getattr(telethon_client, "is_connected", None):
+                # if real method available
+                await telethon_client.disconnect()
+            else:
+                await telethon_client.disconnect()
+        except Exception as e:
+            logger.warning("Telethon disconnect failed: %s", e)
 
 if __name__ == "__main__":
     asyncio.run(main())
