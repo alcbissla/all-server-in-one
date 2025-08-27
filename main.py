@@ -1,4 +1,4 @@
-import os, re, time, asyncio, logging
+import os, re, time, asyncio, threading, logging
 from datetime import datetime, timedelta
 
 from dotenv import load_dotenv
@@ -8,10 +8,18 @@ from flask import Flask, request, render_template_string, abort, Response
 import yt_dlp
 
 from telegram import Update
-from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
-from telethon import TelegramClient
+from telegram.ext import (
+    Application,
+    CommandHandler,
+    MessageHandler,
+    ContextTypes,
+    filters,
+)
 
-# -------- CONFIG ----------
+from telethon import TelegramClient
+from telethon.errors import FloodWaitError
+
+# ========= CONFIG =========
 AUTO_CLEANUP_HOURS = int(os.getenv("AUTO_CLEANUP_HOURS", "12"))
 BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
 DEFAULT_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "").strip()
@@ -22,21 +30,28 @@ API_ID = int(os.getenv("TG_API_ID", "0"))
 API_HASH = os.getenv("TG_API_HASH", "")
 TELETHON_BOT_TOKEN = os.getenv("TELETHON_BOT_TOKEN", "").strip()
 
+# optional helpers (unused in this core file, just loaded to keep parity with your env)
+TIKTOK_API = os.getenv("TIKTOK_API", "").strip()
+FACEBOOK_API = os.getenv("FACEBOOK_API", "").strip()
+TWITTER_API = os.getenv("TWITTER_API", "").strip()
+
 IG_SESSIONID = os.getenv("INSTAGRAM_SESSIONID", "").strip()
 FACEBOOK_CUSER = os.getenv("FACEBOOK_CUSER", "").strip()
 FACEBOOK_XS = os.getenv("FACEBOOK_XS", "").strip()
 TWITTER_AUTH_TOKEN = os.getenv("TWITTER_AUTH_TOKEN", "").strip()
 
+# Backoff guard to avoid frequent ImportBotAuthorization (FloodWait on rapid restarts)
+TELETHON_LOGIN_BACKOFF_SECONDS = int(os.getenv("TELETHON_LOGIN_BACKOFF_SECONDS", "600"))
+TELETHON_SESSION_NAME = os.getenv("TELETHON_SESSION_NAME", "telethon")  # persist session file
+
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+# ========= APP BOOT =========
 app = Flask(__name__)
 os.makedirs("downloads", exist_ok=True)
 
-# Telethon client using BOT TOKEN
-telethon_client = TelegramClient("telethon", API_ID, API_HASH).start(bot_token=TELETHON_BOT_TOKEN)
-
-# ---------------- HTML TEMPLATE ----------------
+# ========= HTML (keep your previous template) =========
 HTML_TEMPLATE = """<!DOCTYPE html>
 <html lang="en" data-theme="light">
 <head>
@@ -122,39 +137,46 @@ if(prefersDark){document.documentElement.setAttribute('data-theme','dark');}
 </body>
 </html>"""
 
-# ---------------- CLEANUP ----------------
+# ========= HOUSEKEEPING =========
 def cleanup_old_files():
+    """Delete files older than AUTO_CLEANUP_HOURS from ./downloads."""
     while True:
-        now = datetime.now()
-        for f in os.listdir("downloads"):
-            path = os.path.join("downloads", f)
-            if os.path.isfile(path):
-                try:
-                    if now - datetime.fromtimestamp(os.path.getmtime(path)) > timedelta(hours=AUTO_CLEANUP_HOURS):
-                        os.remove(path)
-                        logger.info("🧹 Removed old file: %s", path)
-                except Exception as e:
-                    logger.debug("cleanup error: %s", e)
+        try:
+            now = datetime.now()
+            for f in os.listdir("downloads"):
+                path = os.path.join("downloads", f)
+                if os.path.isfile(path):
+                    try:
+                        mtime = datetime.fromtimestamp(os.path.getmtime(path))
+                        if now - mtime > timedelta(hours=AUTO_CLEANUP_HOURS):
+                            os.remove(path)
+                            logger.info("🧹 Removed old file: %s", path)
+                    except Exception as e:
+                        logger.debug("cleanup error for %s: %s", path, e)
+        except Exception as e:
+            logger.debug("cleanup loop error: %s", e)
         time.sleep(3600)
 
-# ---------------- DOWNLOAD ----------------
+# ========= DOWNLOADER =========
 def download_video(url, progress_hook=None):
+    """Blocking download via yt-dlp. Returns (info, mp4_path)."""
     ydl_opts = {
         "format": "bestvideo+bestaudio/best",
         "outtmpl": "downloads/%(id)s.%(ext)s",
         "noplaylist": True,
         "merge_output_format": "mp4",
-        "progress_hooks": [progress_hook] if progress_hook else []
+        "progress_hooks": [progress_hook] if progress_hook else [],
     }
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
         info = ydl.extract_info(url, download=True)
         filename = ydl.prepare_filename(info)
         if not filename.endswith(".mp4"):
-            filename = os.path.splitext(filename)[0] + ".mp4"
+            root, _ = os.path.splitext(filename)
+            filename = root + ".mp4"
         return info, filename
 
-# ---------------- FLASK ----------------
-@app.route("/", methods=["GET","POST"])
+# ========= FLASK =========
+@app.route("/", methods=["GET", "POST"])
 def index():
     title = None
     filename = None
@@ -169,68 +191,101 @@ def index():
                 title = info.get("title", "Video")
             except Exception as e:
                 error = str(e)
-    return render_template_string(HTML_TEMPLATE,
-                                  title=title,
-                                  filename=os.path.basename(filename) if filename else None,
-                                  error=error)
+    return render_template_string(
+        HTML_TEMPLATE,
+        title=title,
+        filename=os.path.basename(filename) if filename else None,
+        error=error,
+    )
 
 @app.route("/video/<path:filename>")
 def serve_video(filename):
     path = os.path.join("downloads", os.path.basename(filename))
     if not os.path.exists(path):
         abort(404)
+
     def generate():
         with open(path, "rb") as f:
-            yield from f
+            for chunk in iter(lambda: f.read(1024 * 1024), b""):
+                yield chunk
         try:
             os.remove(path)
             logger.info("🗑️ Deleted after serve: %s", path)
         except Exception as e:
             logger.warning("Failed to delete %s: %s", path, e)
+
     return Response(generate(), mimetype="video/mp4")
 
-# ---------------- TELEGRAM BOT ----------------
+# ========= TELEGRAM (PTB + Telethon) =========
 async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("Send me a video link. I’ll download & upload up to 2 GB.")
 
-async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
+def _make_download_hook(message, loop):
+    """Create a yt-dlp progress hook that edits the Telegram message from any thread."""
+    def hook(d):
+        if d.get("status") == "downloading":
+            downloaded = d.get("downloaded_bytes") or 0
+            total = d.get("total_bytes") or d.get("total_bytes_estimate") or 1
+            percent = downloaded / total * 100
+            speed = (d.get("speed") or 0) / 1024 / 1024
+            asyncio.run_coroutine_threadsafe(
+                message.edit_text(f"⬇️ Downloading: {percent:.1f}% @ {speed:.2f} MB/s"),
+                loop,
+            )
+    return hook
+
+def _make_upload_cb(message, loop):
+    """Telethon upload progress -> edit Telegram message (thread-safe)."""
+    def cb(sent_bytes: int, total_bytes: int):
+        try:
+            pct = (sent_bytes / max(total_bytes, 1)) * 100
+        except Exception:
+            pct = 0.0
+        asyncio.run_coroutine_threadsafe(
+            message.edit_text(f"⬆️ Uploading: {pct:.1f}%"),
+            loop,
+        )
+    return cb
+
+async def handle_link(telethon_client: TelegramClient, update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Single handler implementation; wrapped with PTB to inject telethon_client."""
     if not update.message or not update.message.text:
         return
     url = update.message.text.strip()
     msg = await update.message.reply_text("⏳ Downloading...")
+    loop = asyncio.get_running_loop()
     file_path = None
 
-    def download_hook(d):
-        if d['status'] == 'downloading':
-            downloaded = d.get('downloaded_bytes') or 0
-            total = d.get('total_bytes') or d.get('total_bytes_estimate') or 1
-            percent = downloaded / total * 100
-            speed = (d.get('speed') or 0) / 1024 / 1024
-            asyncio.run_coroutine_threadsafe(
-                msg.edit_text(f"⬇️ Downloading: {percent:.1f}% @ {speed:.2f} MB/s"),
-                asyncio.get_event_loop()
-            )
-
     try:
-        info, file_path = download_video(url, progress_hook=download_hook)
-        caption = info.get("title", "Video")
-        sent = await telethon_client.send_file(
-            CHANNEL_ID,
-            file_path,
-            caption=caption,
-            progress_callback=lambda sent_bytes, total_bytes: asyncio.run_coroutine_threadsafe(
-                msg.edit_text(f"⬆️ Uploading: {sent_bytes / total_bytes * 100:.1f}%"), asyncio.get_event_loop()
-            )
+        # run blocking yt-dlp in a thread, but still show progress back to the bot chat
+        info, file_path = await loop.run_in_executor(
+            None,
+            lambda: download_video(url, progress_hook=_make_download_hook(msg, loop)),
         )
+        caption = info.get("title", "Video")
+
+        # Upload to channel with Telethon (progress callback edits same message)
+        await telethon_client.send_file(
+            entity=CHANNEL_ID,
+            file=file_path,
+            caption=caption,
+            progress_callback=_make_upload_cb(msg, loop),
+        )
+
+        # Forward from channel to the user via Bot API
         await context.bot.forward_message(
             chat_id=update.message.chat_id,
             from_chat_id=CHANNEL_ID,
-            message_id=sent.id
+            message_id=(await telethon_client.get_messages(CHANNEL_ID, limit=1))[0].id,
         )
         await msg.edit_text("✅ Done (uploaded to channel & forwarded).")
+
     except Exception as e:
         logger.exception("handle_link error: %s", e)
-        await msg.edit_text(f"❌ Failed: {e}")
+        try:
+            await msg.edit_text(f"❌ Failed: {e}")
+        except Exception:
+            pass
     finally:
         if file_path and os.path.exists(file_path):
             try:
@@ -239,22 +294,78 @@ async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
             except Exception as e:
                 logger.warning("Could not delete %s: %s", file_path, e)
 
-# ---------------- MAIN ----------------
-async def main():
-    # Start cleanup thread
-    import threading
-    threading.Thread(target=cleanup_old_files, daemon=True).start()
-    # Start Flask server
-    threading.Thread(
-        target=lambda: app.run(host="0.0.0.0", port=PORT, debug=False, use_reloader=False),
-        daemon=True
-    ).start()
+# ========= RUNNERS =========
+def run_flask():
+    app.run(host="0.0.0.0", port=PORT, debug=False, use_reloader=False)
 
-    # Start Telegram bot
+async def ensure_telethon_bot_session(client: TelegramClient):
+    """
+    Start Telethon bot session safely:
+    - Connect
+    - Only sign_in(bot_token=...) if not authorized
+    - Catch FloodWaitError and back off (avoid crashing app)
+    """
+    await client.connect()
+    try:
+        if not await client.is_user_authorized():
+            # simple file timestamp guard to avoid repeated sign_in on rapid restarts
+            stamp_file = ".telethon_login_stamp"
+            now = time.time()
+            last = 0
+            try:
+                if os.path.exists(stamp_file):
+                    last = os.path.getmtime(stamp_file)
+            except Exception:
+                pass
+            if now - last < TELETHON_LOGIN_BACKOFF_SECONDS:
+                logger.warning(
+                    "Skipping Telethon sign_in to avoid FloodWait (last login %.0fs ago).",
+                    now - last,
+                )
+            else:
+                await client.sign_in(bot_token=TELETHON_BOT_TOKEN)
+                try:
+                    with open(stamp_file, "a"):
+                        os.utime(stamp_file, None)
+                except Exception:
+                    pass
+        else:
+            logger.info("Telethon session already authorized.")
+    except FloodWaitError as fw:
+        # Don't crash the service; log and continue (uploads disabled until next restart)
+        logger.error("Telethon FloodWait: wait %s seconds. Continuing without re-login.", fw.seconds)
+    except Exception as e:
+        logger.exception("Telethon init error: %s", e)
+
+async def run_ptb_and_telethon():
+    # Telethon client (persistent session file)
+    telethon_client = TelegramClient(TELETHON_SESSION_NAME, API_ID, API_HASH)
+    await ensure_telethon_bot_session(telethon_client)
+
+    # PTB application (async-safe; no Updater constructor in sync mode)
     app_bot = Application.builder().token(BOT_TOKEN).build()
+
+    # Handlers (wrap telethon_client into the PTB handler)
+    async def _handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
+        await handle_link(telethon_client, update, context)
+
     app_bot.add_handler(CommandHandler("start", start_cmd))
-    app_bot.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_link))
-    await app_bot.run_polling()
+    app_bot.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, _handle_link))
+
+    # Async lifecycle (prevents __slots__ error)
+    await app_bot.initialize()
+    await app_bot.start()
+    await app_bot.updater.start_polling()
+    # blocks until stop signal
+    await app_bot.updater.idle()
+
+async def main():
+    # Start background maintenance threads
+    threading.Thread(target=cleanup_old_files, daemon=True).start()
+    threading.Thread(target=run_flask, daemon=True).start()
+
+    # Run PTB + Telethon in this loop
+    await run_ptb_and_telethon()
 
 if __name__ == "__main__":
     asyncio.run(main())
