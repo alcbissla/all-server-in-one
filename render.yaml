@@ -1,44 +1,43 @@
+# Render configuration file for automatic deployment
 services:
   - type: web
-    name: video-downloader
+    name: telegram-bot
     env: python
     plan: free
-    buildCommand: |
-      apt-get update && apt-get install -y ffmpeg
-      pip install -r requirements.txt
+    buildCommand: pip install .
     startCommand: python main.py
     envVars:
       - key: TELEGRAM_BOT_TOKEN
-        value: "YOUR_TELEGRAM_BOT_TOKEN"
+        sync: false
+      - key: PORT
+        value: 10000
       - key: TELEGRAM_CHAT_ID
-        value: "YOUR_DEFAULT_CHAT_ID"
+        sync: false
       - key: TELEGRAM_CHANNEL_ID
-        value: "YOUR_TELEGRAM_CHANNEL_ID"
-      - key: TG_API_ID
-        value: "YOUR_TG_API_ID"
-      - key: TG_API_HASH
-        value: "YOUR_TG_API_HASH"
+        sync: false
+      - key: FOLLOWING_CHANNEL
+        value: "@allinonemaker"
+      - key: AUTO_CLEANUP_HOURS
+        value: "12"
+      - key: INSTAGRAM_SESSIONID
+        sync: false
+      - key: TWITTER_AUTH_TOKEN
+        sync: false
+      - key: FACEBOOK_CUSER
+        sync: false
+      - key: FACEBOOK_XS
+        sync: false
+      - key: TELEGRAM_API_ID
+        sync: false
+      - key: TELEGRAM_API_HASH
+        sync: false
       - key: TELETHON_BOT_TOKEN
-        value: "YOUR_TELETHON_BOT_TOKEN"
+        sync: false
+      # Optional helper APIs for fallback downloads
       - key: TIKTOK_API
         value: "https://www.tikwm.com/api/?url="
       - key: FACEBOOK_API
         value: "https://myapi-2f5b.onrender.com/fbvideo/search?url="
       - key: TWITTER_API
         value: "https://twitsave.com/info?url="
-      - key: AUTO_CLEANUP_HOURS
-        value: "12"
-      - key: PORT
-        value: "10000"
-      - key: INSTAGRAM_SESSIONID
-        value: ""
-      - key: FACEBOOK_CUSER
-        value: ""
-      - key: FACEBOOK_XS
-        value: ""
-      - key: TWITTER_AUTH_TOKEN
-        value: ""
-      - key: FACEBOOK_COOKIES
-        value: ""
-      - key: TWITTER_COOKIES
-        value: ""
+    healthCheckPath: /
