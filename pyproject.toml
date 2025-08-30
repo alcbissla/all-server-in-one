@@ -1,0 +1,41 @@
+[project]
+name = "telegram-bot-social-media-downloader"
+version = "1.0.0"
+description = "All-in-One Social Media Video Downloader Telegram Bot for YouTube, Facebook, TikTok, Twitter, Instagram, and m3u8 streams"
+requires-python = ">=3.11"
+dependencies = [
+    # Core async libraries used in main.py
+    "aiofiles>=24.1.0",
+    "aiohttp>=3.12.15",
+    "httpx[socks]>=0.28.1",
+    "nest-asyncio>=1.6.0",
+    
+    # Telegram bot framework
+    "python-telegram-bot>=21.5",
+    
+    # Video downloaders and processors
+    "yt-dlp>=2025.8.27",
+    "instaloader>=4.14.2",
+    "instagrapi>=2.2.1",
+    "moviepy>=1.0.3",
+    "m3u8>=6.0.0",
+    
+    # Web scraping and automation
+    "playwright>=1.55.0",
+    "cloudscraper>=1.2.71",
+    "beautifulsoup4>=4.13.5",
+    
+    # Utilities and tools
+    "tqdm>=4.67.1",
+    "tenacity>=9.1.2",
+    "loguru>=0.7.3",
+    "python-dotenv>=1.1.1",
+    
+    # Web framework for deployment
+    "flask>=3.1.2",
+    "requests>=2.32.4",
+]
+
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
