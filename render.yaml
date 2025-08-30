@@ -4,7 +4,7 @@ services:
     name: telegram-bot
     env: python
     plan: free
-    buildCommand: pip install .
+    buildCommand: pip install --upgrade pip && pip install .
     startCommand: python main.py
     envVars:
       - key: TELEGRAM_BOT_TOKEN
