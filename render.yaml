@@ -1,7 +1,7 @@
 # Render configuration file for automatic deployment
 services:
   - type: web
-    name: telegram-bot
+    name: telegram-bot-enhanced
     env: python
     plan: free
     buildCommand: pip install --upgrade pip && pip install .
@@ -19,6 +19,8 @@ services:
         value: "@allinonemaker"
       - key: AUTO_CLEANUP_HOURS
         value: "12"
+      - key: DEVELOPER_CREDIT
+        value: "@Alcboss112"
       - key: INSTAGRAM_SESSIONID
         sync: false
       - key: TWITTER_AUTH_TOKEN
