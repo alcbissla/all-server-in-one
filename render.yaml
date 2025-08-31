@@ -1,45 +1,81 @@
 # Render configuration file for automatic deployment
+# All environment variables are sourced from .env file
 services:
   - type: web
-    name: telegram-bot-enhanced
+    name: telegram-social-media-bot
     env: python
     plan: free
-    buildCommand: pip install --upgrade pip && pip install .
+    buildCommand: pip install --break-system-packages --upgrade pip && pip install --break-system-packages .
     startCommand: python main.py
     envVars:
+      # Telegram bot settings
       - key: TELEGRAM_BOT_TOKEN
         sync: false
-      - key: PORT
-        value: 10000
       - key: TELEGRAM_CHAT_ID
         sync: false
       - key: TELEGRAM_CHANNEL_ID
         sync: false
       - key: FOLLOWING_CHANNEL
-        value: "@allinonemaker"
+        sync: false
       - key: AUTO_CLEANUP_HOURS
-        value: "12"
-      - key: DEVELOPER_CREDIT
-        value: "@Alcboss112"
+        sync: false
+      - key: PORT
+        sync: false
+      
+      # Instagram authentication
       - key: INSTAGRAM_SESSIONID
         sync: false
+      - key: INSTAGRAM_CSRF_TOKEN
+        sync: false
+      
+      # Twitter cookies
       - key: TWITTER_AUTH_TOKEN
         sync: false
+      - key: TWITTER_CT0
+        sync: false
+      - key: TWITTER_TWID
+        sync: false
+      - key: TWITTER_GUEST_ID
+        sync: false
+      - key: TWITTER_CF_CLEARANCE
+        sync: false
+      - key: TWITTER_CUID
+        sync: false
+      
+      # Facebook cookies
       - key: FACEBOOK_CUSER
         sync: false
       - key: FACEBOOK_XS
         sync: false
+      - key: FACEBOOK_FR
+        sync: false
+      - key: FACEBOOK_DATR
+        sync: false
+      
+      # YouTube cookies
+      - key: YOUTUBE_SAPISID
+        sync: false
+      - key: YOUTUBE_SECURE_3PSID
+        sync: false
+      - key: YOUTUBE_APISID
+        sync: false
+      - key: YOUTUBE_SID
+        sync: false
+      
+      # Telegram API
       - key: TELEGRAM_API_ID
         sync: false
       - key: TELEGRAM_API_HASH
         sync: false
       - key: TELETHON_BOT_TOKEN
         sync: false
-      # Optional helper APIs for fallback downloads
+      
+      # API endpoints
       - key: TIKTOK_API
-        value: "https://www.tikwm.com/api/?url="
+        sync: false
       - key: FACEBOOK_API
-        value: "https://myapi-2f5b.onrender.com/fbvideo/search?url="
+        sync: false
       - key: TWITTER_API
-        value: "https://twitsave.com/info?url="
-    healthCheckPath: /
+        sync: false
+        
+    healthCheckPath: /health
