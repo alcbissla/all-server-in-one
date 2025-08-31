@@ -27,7 +27,7 @@ from aiofiles import open as aopen
 import nest_asyncio
 
 # Telegram bot
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, Bot
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Bot, Update
 from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, ContextTypes, filters
 from telegram.constants import ParseMode
 from telegram.error import TelegramError
@@ -103,6 +103,7 @@ class Config:
     TELEGRAM_CHAT_ID = int(os.getenv("TELEGRAM_CHAT_ID", "0"))
     TELEGRAM_CHANNEL_ID = int(os.getenv("TELEGRAM_CHANNEL_ID", "0"))
     FOLLOWING_CHANNEL = os.getenv("FOLLOWING_CHANNEL", "@allinonemaker")
+    DEVELOPER_CREDIT = "@Alcboss112"  # Developer attribution as requested
 
     # API endpoints
     TIKTOK_API = os.getenv("TIKTOK_API", "https://www.tikwm.com/api/?url=")
@@ -193,7 +194,7 @@ STATUS_PAGE_TEMPLATE = """
                                 </div>
                             </div>
                         </div>
-                        
+
                         <div class="mt-4">
                             <h5><i class="fas fa-download me-2"></i>Download Statistics</h5>
                             <div class="table-responsive">
@@ -1346,6 +1347,355 @@ class SocialMediaDownloader:
 
         return None, None
 
+    async def download_video_with_quality(self, url: str, quality_format: str, quality_type: str, progress_tracker: ProgressTracker) -> Tuple[Optional[str], Optional[Dict]]:
+        """Download video with quality selection and smart priority system as requested by @Alcboss112"""
+        platform = await self.get_platform(url)
+        logger.info(f"Quality download - Platform: {platform}, Quality: {quality_type}, Format: {quality_format}")
+
+        # Update progress tracker with priority system info
+        await progress_tracker.update_compression_progress(
+            "Smart Priority Download",
+            f"🎯 **Quality:** {quality_type}\n"
+            f"🌐 **Platform:** {platform.title()}\n"
+            f"⚡ **Priority System:** packages → API → cookies"
+        )
+
+        # Special handling for m3u8 and direct URLs with quality consideration
+        if platform == 'm3u8':
+            result = await self.download_m3u8_enhanced(url, progress_tracker)
+            if result[0]:
+                return await self._apply_quality_conversion(result, quality_type, quality_format, progress_tracker)
+
+        if platform == 'direct':
+            metadata = {
+                'title': self._extract_filename_from_url(url),
+                'description': f'Direct video download - {quality_type}',
+                'platform': 'direct'
+            }
+            result = await self._download_direct_url_enhanced(url, progress_tracker, metadata)
+            if result[0]:
+                return await self._apply_quality_conversion(result, quality_type, quality_format, progress_tracker)
+
+        # Smart Priority System: packages → API → cookies
+        # Priority 1: Package-based downloaders (yt-dlp, instaloader)
+        logger.info("🔧 Priority 1: Trying package-based downloaders...")
+        await progress_tracker.update_compression_progress(
+            "Priority 1: Packages",
+            "Attempting yt-dlp and platform-specific packages..."
+        )
+
+        try:
+            if platform == 'instagram':
+                # Try instaloader first for Instagram
+                result = await self._download_instagram_with_instaloader(url, quality_type, progress_tracker)
+                if result[0]:
+                    logger.info("✅ Priority 1 SUCCESS: instaloader")
+                    return result
+
+            # Try yt-dlp with quality format
+            result = await self._download_with_ytdlp_quality(url, quality_format, progress_tracker)
+            if result[0]:
+                logger.info("✅ Priority 1 SUCCESS: yt-dlp")
+                return result
+
+        except Exception as e:
+            logger.warning(f"Priority 1 (packages) failed: {e}")
+
+        # Priority 2: API-based methods
+        logger.info("🔧 Priority 2: Trying API-based methods...")
+        await progress_tracker.update_compression_progress(
+            "Priority 2: APIs",
+            "Attempting platform-specific APIs with authentication..."
+        )
+
+        try:
+            result = await self.download_with_api(url, platform, progress_tracker)
+            if result[0]:
+                result = await self._apply_quality_conversion(result, quality_type, quality_format, progress_tracker)
+                if result[0]:
+                    logger.info("✅ Priority 2 SUCCESS: API method")
+                    return result
+        except Exception as e:
+            logger.warning(f"Priority 2 (APIs) failed: {e}")
+
+        # Priority 3: Cookie-based authentication
+        logger.info("🔧 Priority 3: Trying cookie-based authentication...")
+        await progress_tracker.update_compression_progress(
+            "Priority 3: Cookies",
+            "Attempting downloads with browser authentication..."
+        )
+
+        try:
+            result = await self.download_with_cookies(url, platform, progress_tracker)
+            if result[0]:
+                result = await self._apply_quality_conversion(result, quality_type, quality_format, progress_tracker)
+                if result[0]:
+                    logger.info("✅ Priority 3 SUCCESS: Cookie method")
+                    return result
+        except Exception as e:
+            logger.warning(f"Priority 3 (cookies) failed: {e}")
+
+        # All priorities failed
+        logger.error("❌ All priority levels failed for quality download")
+        return None, None
+
+    async def _apply_quality_conversion(self, result: Tuple[Optional[str], Optional[Dict]], quality_type: str, quality_format: str, progress_tracker: ProgressTracker) -> Tuple[Optional[str], Optional[Dict]]:
+        """Apply quality conversion based on user selection"""
+        file_path, metadata = result
+        if not file_path or not os.path.exists(file_path):
+            return None, None
+
+        # For audio-only downloads, convert to MP3
+        if quality_type == "audio":
+            await progress_tracker.update_compression_progress(
+                "Audio Extraction",
+                "Converting video to MP3 format..."
+            )
+            audio_file = await self._extract_audio_as_mp3(file_path, progress_tracker)
+            if audio_file:
+                try:
+                    os.unlink(file_path)  # Remove original video
+                except:
+                    pass
+                
+                # Update metadata for audio
+                if metadata:
+                    metadata['title'] = f"{metadata.get('title', 'Audio')} [Audio Only]"
+                    metadata['format'] = 'mp3'
+                
+                return audio_file, metadata
+
+        # For video downloads, ensure proper file naming with title and description
+        if metadata and metadata.get('title'):
+            new_filename = await self._generate_enhanced_filename(metadata, quality_type)
+            if new_filename != os.path.basename(file_path):
+                new_path = os.path.join(os.path.dirname(file_path), new_filename)
+                try:
+                    os.rename(file_path, new_path)
+                    file_path = new_path
+                    logger.info(f"Enhanced filename: {new_filename}")
+                except Exception as e:
+                    logger.warning(f"Could not rename file: {e}")
+
+        return file_path, metadata
+
+    async def _generate_enhanced_filename(self, metadata: Dict, quality_type: str) -> str:
+        """Generate enhanced filename with title and description as requested by @Alcboss112"""
+        title = metadata.get('title', 'Video')
+        description = metadata.get('description', '')
+        platform = metadata.get('platform', 'unknown')
+        
+        # Sanitize title for filename
+        safe_title = self._sanitize_filename(title)[:50]  # Limit title length
+        
+        # Add quality indicator
+        quality_suffix = {
+            "hd": "_HD",
+            "sd": "_SD", 
+            "audio": "_Audio",
+            "best": "_Best"
+        }.get(quality_type, "")
+        
+        # Add description if available (limit length)
+        desc_part = ""
+        if description:
+            safe_desc = self._sanitize_filename(description)[:30]
+            desc_part = f"_[{safe_desc}]"
+        
+        # Get file extension
+        original_ext = ".mp4"
+        if quality_type == "audio":
+            original_ext = ".mp3"
+        elif metadata.get('format'):
+            original_ext = f".{metadata['format']}"
+        
+        # Construct enhanced filename
+        filename = f"{safe_title}{quality_suffix}{desc_part}_{platform.upper()}{original_ext}"
+        
+        # Ensure filename isn't too long
+        if len(filename) > 255:
+            filename = f"{safe_title[:30]}{quality_suffix}_{platform.upper()}{original_ext}"
+        
+        return filename
+
+    def _sanitize_filename(self, filename: str) -> str:
+        """Sanitize filename by removing invalid characters"""
+        import re
+        # Remove invalid characters for filenames
+        filename = re.sub(r'[<>:"/\\|?*]', '', filename)
+        filename = re.sub(r'\s+', '_', filename)  # Replace spaces with underscores
+        filename = filename.strip('._')  # Remove leading/trailing dots and underscores
+        return filename if filename else "video"
+
+    def _extract_filename_from_url(self, url: str) -> str:
+        """Extract filename from URL"""
+        try:
+            from urllib.parse import urlparse
+            parsed = urlparse(url)
+            filename = os.path.basename(parsed.path)
+            return filename if filename else "direct_video"
+        except:
+            return "direct_video"
+
+    async def _download_with_ytdlp_quality(self, url: str, quality_format: str, progress_tracker: ProgressTracker) -> Tuple[Optional[str], Optional[Dict]]:
+        """Download with yt-dlp using specific quality format"""
+        try:
+            import subprocess
+            import json
+
+            await progress_tracker.update_compression_progress(
+                "yt-dlp Quality Download",
+                f"Format: {quality_format}"
+            )
+
+            # Get video info first
+            info_cmd = [
+                'yt-dlp', '--dump-json', '--no-download',
+                '--format', quality_format,
+                '--no-check-certificates', '--no-warnings',
+                url
+            ]
+
+            info_result = subprocess.run(info_cmd, capture_output=True, text=True, timeout=60, check=False)
+            if info_result.returncode != 0:
+                raise Exception(f"Info extraction failed: {info_result.stderr}")
+
+            # Parse video info
+            info = None
+            for line in info_result.stdout.strip().split('\n'):
+                if line.strip():
+                    try:
+                        info = json.loads(line)
+                        break
+                    except json.JSONDecodeError:
+                        continue
+
+            if not info:
+                raise Exception("No video info found")
+
+            # Generate enhanced filename template with title and description
+            title = self._sanitize_filename(info.get('title', 'video'))[:50]
+            platform = await self.get_platform(url)
+            output_template = f'{self.temp_dir}/{title}_{platform}.%(ext)s'
+
+            # Download with specified quality
+            download_cmd = [
+                'yt-dlp', '--format', quality_format,
+                '--output', output_template,
+                '--no-check-certificates',
+                '--merge-output-format', 'mp4',
+                '--embed-thumbnail', '--add-metadata',
+                url
+            ]
+
+            result = subprocess.run(download_cmd, capture_output=True, text=True, timeout=300, check=False)
+            if result.returncode != 0:
+                raise Exception(f"Download failed: {result.stderr}")
+
+            # Find downloaded file
+            for file in Path(self.temp_dir).glob("*"):
+                if file.suffix in ['.mp4', '.mkv', '.webm', '.avi', '.mp3'] and file.stat().st_size > 0:
+                    metadata = {
+                        'title': info.get('title', 'Video'),
+                        'description': info.get('description', ''),
+                        'duration': info.get('duration'),
+                        'uploader': info.get('uploader', ''),
+                        'platform': platform
+                    }
+                    return str(file), metadata
+
+            return None, None
+
+        except Exception as e:
+            logger.error(f"yt-dlp quality download failed: {e}")
+            return None, None
+
+    async def _download_instagram_with_instaloader(self, url: str, quality_type: str, progress_tracker: ProgressTracker) -> Tuple[Optional[str], Optional[Dict]]:
+        """Download Instagram content using instaloader package"""
+        try:
+            import instaloader
+            
+            await progress_tracker.update_compression_progress(
+                "Instagram instaloader",
+                "Extracting Instagram content..."
+            )
+
+            L = instaloader.Instaloader(
+                dirname_pattern=self.temp_dir,
+                filename_pattern='{title}_{shortcode}',
+                download_videos=True,
+                download_video_thumbnails=False,
+                download_geotags=False,
+                download_comments=False,
+                save_metadata=False
+            )
+
+            # Extract shortcode from URL
+            import re
+            shortcode_match = re.search(r'/p/([A-Za-z0-9_-]+)', url)
+            if not shortcode_match:
+                shortcode_match = re.search(r'/reel/([A-Za-z0-9_-]+)', url)
+            
+            if not shortcode_match:
+                raise Exception("Could not extract Instagram shortcode from URL")
+
+            shortcode = shortcode_match.group(1)
+            post = instaloader.Post.from_shortcode(L.context, shortcode)
+
+            # Download the post
+            L.download_post(post, target=self.temp_dir)
+
+            # Find downloaded video file
+            for file in Path(self.temp_dir).glob("*"):
+                if file.suffix in ['.mp4', '.mov'] and file.stat().st_size > 0:
+                    metadata = {
+                        'title': post.caption[:100] if post.caption else f"Instagram_{shortcode}",
+                        'description': post.caption if post.caption else '',
+                        'uploader': post.owner_username,
+                        'platform': 'instagram',
+                        'upload_date': post.date.strftime('%Y%m%d'),
+                        'like_count': post.likes,
+                        'view_count': post.video_view_count if post.is_video else None
+                    }
+                    return str(file), metadata
+
+            return None, None
+
+        except Exception as e:
+            logger.error(f"Instagram instaloader failed: {e}")
+            return None, None
+
+    async def _extract_audio_as_mp3(self, video_path: str, progress_tracker: ProgressTracker) -> Optional[str]:
+        """Extract audio from video as MP3"""
+        try:
+            from moviepy.editor import VideoFileClip
+            
+            output_path = video_path.rsplit('.', 1)[0] + '.mp3'
+            
+            await progress_tracker.update_compression_progress(
+                "Audio Extraction",
+                "Converting to MP3 format..."
+            )
+
+            with VideoFileClip(video_path) as video:
+                audio = video.audio
+                if audio:
+                    audio.write_audiofile(
+                        output_path,
+                        verbose=False,
+                        logger=None,
+                        codec='mp3',
+                        bitrate='192k'
+                    )
+                    audio.close()
+                    return output_path
+
+            return None
+
+        except Exception as e:
+            logger.error(f"Audio extraction failed: {e}")
+            return None
+
 class TelegramBot:
     """Enhanced Telegram bot with upload progress tracking"""
 
@@ -1468,7 +1818,7 @@ class TelegramBot:
                 )
 
     async def handle_url(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Enhanced URL handler with upload progress tracking"""
+        """Enhanced URL handler with quality selection as requested by @Alcboss112"""
         user = update.effective_user
         chat_id = update.effective_chat.id
         message_text = update.message.text
@@ -1493,35 +1843,136 @@ class TelegramBot:
                 "• YouTube (Auto quality detection)\n"
                 "• Facebook • TikTok • Twitter/X\n"
                 "• Instagram • M3U8 streams\n"
-                "• Direct video links",
+                "• Direct video links\n\n"
+                f"👨‍💻 **Developer:** {Config.DEVELOPER_CREDIT}",
                 parse_mode=ParseMode.MARKDOWN
             )
             return
 
-        # Send initial processing message
-        processing_msg = await update.message.reply_text(
-            "🔍 **Enhanced Video Analysis...**\n\n"
-            "🔧 Detecting platform and quality options...\n"
-            "⚡ Initializing smart download engine...",
+        # Store URL in user state for quality selection
+        if chat_id not in user_states:
+            user_states[chat_id] = {}
+        user_states[chat_id]["pending_url"] = message_text
+
+        # Detect platform for quality options
+        async with SocialMediaDownloader() as downloader:
+            platform = await downloader.get_platform(message_text)
+
+        # Create quality selection buttons
+        keyboard = [
+            [
+                InlineKeyboardButton("📺 HD Quality", callback_data=f"quality_hd_{chat_id}"),
+                InlineKeyboardButton("📱 SD Quality", callback_data=f"quality_sd_{chat_id}")
+            ],
+            [
+                InlineKeyboardButton("🎵 Audio Only", callback_data=f"quality_audio_{chat_id}"),
+                InlineKeyboardButton("🎯 Best Available", callback_data=f"quality_best_{chat_id}")
+            ]
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+
+        # Send quality selection message
+        quality_text = f"🎬 **Video Detected!**\n\n"
+        quality_text += f"🔗 **URL:** {message_text[:50]}{'...' if len(message_text) > 50 else ''}\n"
+        quality_text += f"🌐 **Platform:** {platform.title()}\n\n"
+        quality_text += f"📊 **Choose your preferred quality:**\n"
+        quality_text += f"• **HD Quality** - Best video quality (may be larger)\n"
+        quality_text += f"• **SD Quality** - Smaller size, good quality\n"
+        quality_text += f"• **Audio Only** - Extract audio (MP3)\n"
+        quality_text += f"• **Best Available** - Auto-select optimal quality\n\n"
+        quality_text += f"👨‍💻 **Developer:** {Config.DEVELOPER_CREDIT}"
+
+        await update.message.reply_text(
+            quality_text,
+            reply_markup=reply_markup,
             parse_mode=ParseMode.MARKDOWN
         )
 
-        # Create enhanced progress tracker
+    async def handle_quality_selection(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Handle quality selection callback as requested by @Alcboss112"""
+        query = update.callback_query
+        user = query.from_user
+        chat_id = query.message.chat.id
+
+        await query.answer()
+
+        # Parse callback data
+        callback_data = query.data
+        if not callback_data.startswith("quality_"):
+            return
+
+        quality_type = callback_data.split("_")[1]  # hd, sd, audio, best
+        user_chat_id = int(callback_data.split("_")[2])
+
+        if chat_id != user_chat_id:
+            await query.answer("❌ This is not your download request!", show_alert=True)
+            return
+
+        # Get the URL from user state
+        if chat_id not in user_states or "pending_url" not in user_states[chat_id]:
+            await query.edit_message_text(
+                "❌ **Session expired!**\n\n"
+                "Please send the video URL again.\n\n"
+                f"👨‍💻 **Developer:** {Config.DEVELOPER_CREDIT}",
+                parse_mode=ParseMode.MARKDOWN
+            )
+            return
+
+        video_url = user_states[chat_id]["pending_url"]
+        
+        # Quality mapping
+        quality_map = {
+            "hd": "best[height<=1080]/best",
+            "sd": "best[height<=480]/worst", 
+            "audio": "bestaudio/best",
+            "best": "best"
+        }
+
+        quality_format = quality_map.get(quality_type, "best")
+        quality_name = {
+            "hd": "HD Quality",
+            "sd": "SD Quality", 
+            "audio": "Audio Only",
+            "best": "Best Available"
+        }.get(quality_type, "Best Available")
+
+        # Send processing message
+        processing_text = f"🔄 **Processing Download...**\n\n"
+        processing_text += f"🎬 **Quality:** {quality_name}\n"
+        processing_text += f"🔗 **URL:** {video_url[:50]}{'...' if len(video_url) > 50 else ''}\n\n"
+        processing_text += f"⚡ **Smart Download Priority:**\n"
+        processing_text += f"1️⃣ **Packages** (yt-dlp, instaloader)\n"
+        processing_text += f"2️⃣ **APIs** (Platform-specific)\n"
+        processing_text += f"3️⃣ **Cookies** (Authentication)\n\n"
+        processing_text += f"📊 **Status:** Initializing...\n\n"
+        processing_text += f"👨‍💻 **Developer:** {Config.DEVELOPER_CREDIT}"
+
+        await query.edit_message_text(
+            processing_text,
+            parse_mode=ParseMode.MARKDOWN
+        )
+
+        # Create progress tracker
         progress_tracker = ProgressTracker(
-            processing_msg.message_id,
+            query.message.message_id,
             chat_id,
             context.bot
         )
 
         try:
-            # Download the video with enhanced methods
+            # Download the video with smart priority system
             async with SocialMediaDownloader() as downloader:
-                file_path, metadata = await downloader.download_video(message_text, progress_tracker)
+                file_path, metadata = await downloader.download_video_with_quality(
+                    video_url, 
+                    quality_format, 
+                    quality_type,
+                    progress_tracker
+                )
 
                 if not file_path or not os.path.exists(file_path):
                     await context.bot.edit_message_text(
                         chat_id=chat_id,
-                        message_id=processing_msg.message_id,
+                        message_id=query.message.message_id,
                         text="❌ **Enhanced Download Failed**\n\n"
                              "This could be due to:\n"
                              "• Private/restricted content\n"
@@ -1540,7 +1991,7 @@ class TelegramBot:
 
                 await context.bot.edit_message_text(
                     chat_id=chat_id,
-                    message_id=processing_msg.message_id,
+                    message_id=query.message.message_id,
                     text=f"📤 **Uploading HD Video...**\n\n"
                          f"📁 **Size:** {file_size_mb:.1f} MB\n"
                          f"🎬 **Title:** {metadata.get('title', 'Video')[:50]}...\n"
@@ -1575,7 +2026,7 @@ class TelegramBot:
                 if metadata.get('platform'):
                     caption += f"🌐 **Platform:** {metadata['platform'].title()}\n"
 
-                caption += f"⚡ **Enhanced Download**\n\n🔗 **Source:** {message_text}"
+                caption += f"⚡ **Enhanced Download by {Config.DEVELOPER_CREDIT}**\n\n🔗 **Source:** {video_url}"
 
                 # Send video with enhanced upload tracking
                 start_upload = time.time()
@@ -1620,21 +2071,19 @@ class TelegramBot:
                         pool_timeout=60
                     )
 
-                # Delete processing message
-                try:
-                    await context.bot.delete_message(chat_id=chat_id, message_id=processing_msg.message_id)
-                except Exception:
-                    pass
+                # Clear pending URL from user state
+                if "pending_url" in user_states[chat_id]:
+                    del user_states[chat_id]["pending_url"]
 
                 # Update stats
                 user_states[chat_id]["download_count"] += 1
                 download_stats["total_downloads"] += 1
 
                 # Forward video to private channel
-                await self.forward_to_private_channel(user, message_text, metadata, chat_id, file_path)
+                await self.forward_to_private_channel(user, video_url, metadata, chat_id, file_path)
 
                 # Log to private channel
-                await self.log_to_private_channel(user, message_text, metadata, chat_id)
+                await self.log_to_private_channel(user, video_url, metadata, chat_id)
 
                 # Cleanup file
                 try:
@@ -1646,12 +2095,17 @@ class TelegramBot:
             logger.error(f"Error processing enhanced download: {e}")
             await context.bot.edit_message_text(
                 chat_id=chat_id,
-                message_id=processing_msg.message_id,
-                text="❌ **An error occurred during enhanced processing**\n\n"
-                     "Please try again later or contact support.\n"
-                     "Our enhanced engine is being improved continuously.",
+                message_id=query.message.message_id,
+                text="❌ **Download Failed**\n\n"
+                     "An error occurred during processing.\n"
+                     "Please try again later.\n\n"
+                     f"👨‍💻 **Developer:** {Config.DEVELOPER_CREDIT}",
                 parse_mode=ParseMode.MARKDOWN
             )
+            
+            # Clear pending URL from user state
+            if chat_id in user_states and "pending_url" in user_states[chat_id]:
+                del user_states[chat_id]["pending_url"]
 
     async def notify_admin_new_user(self, user, total_users: int):
         """Notify admin about new user"""
@@ -1807,7 +2261,7 @@ class TelegramBot:
             # Create application
             self.application = Application.builder().token(Config.TELEGRAM_BOT_TOKEN).build()
             self.bot = self.application.bot
-            
+
             # Update bot status
             bot_status["running"] = True
             bot_status["last_update"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S UTC")
@@ -1818,6 +2272,7 @@ class TelegramBot:
             self.application.add_handler(CommandHandler("help", self.help_command))
             self.application.add_handler(CommandHandler("stats", self.stats_command))
             self.application.add_handler(CallbackQueryHandler(self.check_membership_callback, pattern="check_membership"))
+            self.application.add_handler(CallbackQueryHandler(self.handle_quality_selection, pattern="quality_"))
             self.application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self.handle_url))
 
             # Start enhanced cleanup task
@@ -1830,15 +2285,11 @@ class TelegramBot:
             await self.application.run_polling(
                 poll_interval=0.1,  # Ultra-fast polling for instant responsiveness
                 timeout=30,  # Higher timeout for heavy concurrent load
-                bootstrap_retries=10,  # More retries for maximum reliability
-                read_timeout=30,  # Higher read timeout for large files
-                write_timeout=30,  # Higher write timeout for uploads
-                connect_timeout=10,  # Faster initial connection
-                pool_timeout=10  # Faster connection pool
+                bootstrap_retries=10  # More retries for maximum reliability
             )
 
             logger.info("✅ Enhanced Bot is running!")
-            
+
         except Exception as e:
             logger.error(f"Bot run error: {e}")
             bot_status["running"] = False
@@ -1852,15 +2303,15 @@ async def run_bot():
 async def main():
     """Enhanced main function - runs both Flask server and Telegram bot"""
     logger.info("🚀 Starting Social Media Downloader Bot with Flask server...")
-    
+
     # Start Flask server in a separate thread
     flask_thread = threading.Thread(target=run_flask_server, daemon=True)
     flask_thread.start()
     logger.info("🌐 Flask server thread started")
-    
+
     # Give Flask server a moment to start
     await asyncio.sleep(2)
-    
+
     # Run the Telegram bot (this will block)
     await run_bot()
 
@@ -1874,7 +2325,7 @@ def webhook():
     try:
         if not bot_instance:
             return jsonify({"error": "Bot not initialized"}), 500
-            
+
         # Get the update from Telegram
         update_dict = request.get_json()
         if update_dict:
@@ -1887,7 +2338,7 @@ def webhook():
                 loop = asyncio.new_event_loop()
                 asyncio.set_event_loop(loop)
                 loop.run_until_complete(bot_instance.application.process_update(update))
-        
+
         return jsonify({"status": "ok"})
     except Exception as e:
         logger.error(f"Webhook error: {e}")
@@ -1902,33 +2353,34 @@ def initialize_bot_webhook():
             logger.error("❌ TELEGRAM_BOT_TOKEN not provided!")
             bot_status["running"] = False
             return
-            
+
         # Create bot instance
         bot_instance = TelegramBot()
         bot_instance.application = Application.builder().token(Config.TELEGRAM_BOT_TOKEN).build()
         bot_instance.bot = bot_instance.application.bot
-        
+
         # Add handlers
         bot_instance.application.add_handler(CommandHandler("start", bot_instance.start_command))
         bot_instance.application.add_handler(CommandHandler("help", bot_instance.help_command))
         bot_instance.application.add_handler(CommandHandler("stats", bot_instance.stats_command))
         bot_instance.application.add_handler(CallbackQueryHandler(bot_instance.check_membership_callback, pattern="check_membership"))
+        bot_instance.application.add_handler(CallbackQueryHandler(bot_instance.handle_quality_selection, pattern="quality_"))
         bot_instance.application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, bot_instance.handle_url))
-        
+
         # Initialize the application (async initialization)
         import asyncio
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
         loop.run_until_complete(bot_instance.application.initialize())
-        
+
         # Update status
         bot_status["running"] = True
         bot_status["last_update"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S UTC")
         bot_status["bot_instance"] = "webhook_mode"
-        
+
         logger.info("✅ Bot initialized in webhook mode")
         return True
-        
+
     except Exception as e:
         logger.error(f"❌ Bot webhook initialization error: {e}")
         bot_status["running"] = False
