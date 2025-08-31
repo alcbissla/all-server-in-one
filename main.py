@@ -51,8 +51,20 @@ from loguru import logger
 import m3u8
 from dotenv import load_dotenv
 
+# Flask web server
+from flask import Flask, jsonify, render_template_string, request
+from werkzeug.middleware.proxy_fix import ProxyFix
+import threading
+
 # Load environment variables
 load_dotenv()
+
+# Verify bot token is loaded
+if not os.getenv("TELEGRAM_BOT_TOKEN"):
+    logger.error("❌ TELEGRAM_BOT_TOKEN not found in environment!")
+    logger.info("📝 Please check your .env file or environment variables")
+else:
+    logger.info("✅ Bot token loaded successfully")
 
 # Enable nested async loops
 nest_asyncio.apply()
@@ -107,13 +119,206 @@ class Config:
 
     # Settings
     AUTO_CLEANUP_HOURS = int(os.getenv("AUTO_CLEANUP_HOURS", "12"))
-    PORT = int(os.getenv("PORT", "10000"))
+    PORT = int(os.getenv("PORT", "5000"))
     MAX_FILE_SIZE = 50 * 1024 * 1024  # 50MB (Telegram's limit for bots)
     MAX_VIDEO_SIZE = 2 * 1024 * 1024 * 1024  # 2GB max for full HD videos
 
 # Global variables
 user_states = {}
 download_stats = {"total_users": 0, "total_downloads": 0}
+bot_status = {"running": False, "last_update": None, "bot_instance": None}
+
+# Flask server setup
+app = Flask(__name__)
+app.secret_key = os.environ.get("SESSION_SECRET", "dev-secret-key-change-in-production")
+app.wsgi_app = ProxyFix(app.wsgi_app, x_proto=1, x_host=1)
+
+# HTML template for status page
+STATUS_PAGE_TEMPLATE = """
+<!DOCTYPE html>
+<html lang="en" data-bs-theme="dark">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Social Media Downloader Bot</title>
+    <link href="https://cdn.replit.com/agent/bootstrap-agent-dark-theme.min.css" rel="stylesheet">
+    <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet">
+</head>
+<body>
+    <div class="container mt-5">
+        <div class="row justify-content-center">
+            <div class="col-md-10">
+                <div class="card">
+                    <div class="card-header text-center">
+                        <h1 class="card-title mb-0">
+                            <i class="fab fa-telegram-plane text-info me-2"></i>
+                            Social Media Downloader Bot
+                        </h1>
+                    </div>
+                    <div class="card-body">
+                        <div class="row">
+                            <div class="col-md-6">
+                                <div class="card bg-dark border-secondary">
+                                    <div class="card-body text-center">
+                                        <h5 class="card-title">
+                                            <i class="fas fa-robot me-2"></i>
+                                            Bot Status
+                                        </h5>
+                                        {% if status.running %}
+                                            <span class="badge bg-success fs-6">
+                                                <i class="fas fa-check-circle me-1"></i>
+                                                Running
+                                            </span>
+                                        {% else %}
+                                            <span class="badge bg-danger fs-6">
+                                                <i class="fas fa-times-circle me-1"></i>
+                                                Stopped
+                                            </span>
+                                        {% endif %}
+                                    </div>
+                                </div>
+                            </div>
+                            <div class="col-md-6">
+                                <div class="card bg-dark border-secondary">
+                                    <div class="card-body text-center">
+                                        <h5 class="card-title">
+                                            <i class="fas fa-server me-2"></i>
+                                            Server Status
+                                        </h5>
+                                        <span class="badge bg-success fs-6">
+                                            <i class="fas fa-check-circle me-1"></i>
+                                            Online
+                                        </span>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                        
+                        <div class="mt-4">
+                            <h5><i class="fas fa-download me-2"></i>Download Statistics</h5>
+                            <div class="table-responsive">
+                                <table class="table table-dark table-striped">
+                                    <tbody>
+                                        <tr>
+                                            <td><strong>Total Users</strong></td>
+                                            <td>{{ stats.total_users }}</td>
+                                        </tr>
+                                        <tr>
+                                            <td><strong>Total Downloads</strong></td>
+                                            <td>{{ stats.total_downloads }}</td>
+                                        </tr>
+                                        <tr>
+                                            <td><strong>Supported Platforms</strong></td>
+                                            <td>YouTube, TikTok, Instagram, Facebook, Twitter</td>
+                                        </tr>
+                                        <tr>
+                                            <td><strong>Last Update</strong></td>
+                                            <td>
+                                                {% if status.last_update %}
+                                                    {{ status.last_update }}
+                                                {% else %}
+                                                    Never
+                                                {% endif %}
+                                            </td>
+                                        </tr>
+                                    </tbody>
+                                </table>
+                            </div>
+                        </div>
+
+                        <div class="mt-4">
+                            <h5><i class="fas fa-link me-2"></i>API Endpoints</h5>
+                            <div class="list-group">
+                                <div class="list-group-item list-group-item-action bg-dark border-secondary">
+                                    <div class="d-flex w-100 justify-content-between">
+                                        <h6 class="mb-1">/health</h6>
+                                        <small class="text-info">GET</small>
+                                    </div>
+                                    <p class="mb-1">Health check endpoint for monitoring</p>
+                                </div>
+                                <div class="list-group-item list-group-item-action bg-dark border-secondary">
+                                    <div class="d-flex w-100 justify-content-between">
+                                        <h6 class="mb-1">/status</h6>
+                                        <small class="text-info">GET</small>
+                                    </div>
+                                    <p class="mb-1">Bot status and statistics</p>
+                                </div>
+                                <div class="list-group-item list-group-item-action bg-dark border-secondary">
+                                    <div class="d-flex w-100 justify-content-between">
+                                        <h6 class="mb-1">/wake</h6>
+                                        <small class="text-info">GET</small>
+                                    </div>
+                                    <p class="mb-1">Wake up endpoint to keep service alive</p>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="card-footer text-center text-muted">
+                        <small>
+                            <i class="fas fa-cloud me-1"></i>
+                            Deployed on Render
+                        </small>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
+</body>
+</html>
+"""
+
+@app.route('/')
+def index():
+    """Main page showing bot status and statistics"""
+    return render_template_string(STATUS_PAGE_TEMPLATE, status=bot_status, stats=download_stats)
+
+@app.route('/health')
+def health_check():
+    """Health check endpoint for Render"""
+    return jsonify({
+        "status": "healthy",
+        "bot_running": bot_status["running"],
+        "last_update": bot_status["last_update"],
+        "timestamp": time.time(),
+        "stats": download_stats
+    })
+
+@app.route('/status')
+def status():
+    """Status endpoint returning bot information"""
+    return jsonify({
+        "bot_status": bot_status,
+        "download_stats": download_stats,
+        "timestamp": time.time()
+    })
+
+@app.route('/wake')
+def wake():
+    """Wake endpoint to keep the service alive"""
+    try:
+        logger.info("Wake endpoint called - service is alive")
+        return jsonify({
+            "message": "Service is awake",
+            "bot_status": bot_status["running"],
+            "timestamp": time.time(),
+            "stats": download_stats
+        })
+    except Exception as e:
+        logger.error(f"Wake endpoint error: {e}")
+        return jsonify({
+            "message": "Service is awake but encountered an error",
+            "error": str(e),
+            "timestamp": time.time()
+        }), 500
+
+def run_flask_server():
+    """Run Flask server in a separate thread"""
+    try:
+        logger.info(f"🌐 Starting Flask server on port {Config.PORT}")
+        app.run(host='0.0.0.0', port=Config.PORT, debug=False, use_reloader=False)
+    except Exception as e:
+        logger.error(f"Flask server error: {e}")
 
 class ProgressTracker:
     """Enhanced progress tracker with speed monitoring"""
@@ -1081,7 +1286,7 @@ class SocialMediaDownloader:
 
         # ULTRA SPEED: Try all methods in parallel for fastest possible download
         import asyncio
-        
+
         async def try_yt_dlp():
             try:
                 result = await self.download_with_yt_dlp(url, progress_tracker)
@@ -1114,13 +1319,13 @@ class SocialMediaDownloader:
 
         # Run all methods simultaneously - first one to succeed wins!
         logger.info("🚀 TURBO MODE: Running all download methods in parallel...")
-        
+
         tasks = [
             asyncio.create_task(try_yt_dlp()),
             asyncio.create_task(try_api()),
             asyncio.create_task(try_cookies())
         ]
-        
+
         # Wait for first successful result
         for completed in asyncio.as_completed(tasks):
             try:
@@ -1595,48 +1800,157 @@ class TelegramBot:
         """Run the enhanced bot"""
         if not Config.TELEGRAM_BOT_TOKEN:
             logger.error("TELEGRAM_BOT_TOKEN not provided!")
+            bot_status["running"] = False
             return
 
-        # Create application
-        self.application = Application.builder().token(Config.TELEGRAM_BOT_TOKEN).build()
-        self.bot = self.application.bot
+        try:
+            # Create application
+            self.application = Application.builder().token(Config.TELEGRAM_BOT_TOKEN).build()
+            self.bot = self.application.bot
+            
+            # Update bot status
+            bot_status["running"] = True
+            bot_status["last_update"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S UTC")
+            bot_status["bot_instance"] = self.bot
 
-        # Add handlers
-        self.application.add_handler(CommandHandler("start", self.start_command))
-        self.application.add_handler(CommandHandler("help", self.help_command))
-        self.application.add_handler(CommandHandler("stats", self.stats_command))
-        self.application.add_handler(CallbackQueryHandler(self.check_membership_callback, pattern="check_membership"))
-        self.application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self.handle_url))
+            # Add handlers
+            self.application.add_handler(CommandHandler("start", self.start_command))
+            self.application.add_handler(CommandHandler("help", self.help_command))
+            self.application.add_handler(CommandHandler("stats", self.stats_command))
+            self.application.add_handler(CallbackQueryHandler(self.check_membership_callback, pattern="check_membership"))
+            self.application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self.handle_url))
 
-        # Start enhanced cleanup task
-        asyncio.create_task(self.cleanup_task())
+            # Start enhanced cleanup task
+            asyncio.create_task(self.cleanup_task())
 
-        # Start the enhanced bot
-        logger.info("🚀 Enhanced Bot is starting...")
+            # Start the enhanced bot
+            logger.info("🚀 Enhanced Bot is starting...")
 
-        # Start polling with enhanced settings
-        await self.application.run_polling(
-            poll_interval=0.1,  # Ultra-fast polling for instant responsiveness
-            timeout=30,  # Higher timeout for heavy concurrent load
-            bootstrap_retries=10,  # More retries for maximum reliability
-            read_timeout=30,  # Higher read timeout for large files
-            write_timeout=30,  # Higher write timeout for uploads
-            connect_timeout=10,  # Faster initial connection
-            pool_timeout=10  # Faster connection pool
-        )
+            # Start polling with enhanced settings
+            await self.application.run_polling(
+                poll_interval=0.1,  # Ultra-fast polling for instant responsiveness
+                timeout=30,  # Higher timeout for heavy concurrent load
+                bootstrap_retries=10,  # More retries for maximum reliability
+                read_timeout=30,  # Higher read timeout for large files
+                write_timeout=30,  # Higher write timeout for uploads
+                connect_timeout=10,  # Faster initial connection
+                pool_timeout=10  # Faster connection pool
+            )
 
-        logger.info("✅ Enhanced Bot is running!")
+            logger.info("✅ Enhanced Bot is running!")
+            
+        except Exception as e:
+            logger.error(f"Bot run error: {e}")
+            bot_status["running"] = False
+            raise
 
-async def main():
-    """Enhanced main function"""
+async def run_bot():
+    """Run the Telegram bot"""
     bot = TelegramBot()
     await bot.run()
+
+async def main():
+    """Enhanced main function - runs both Flask server and Telegram bot"""
+    logger.info("🚀 Starting Social Media Downloader Bot with Flask server...")
+    
+    # Start Flask server in a separate thread
+    flask_thread = threading.Thread(target=run_flask_server, daemon=True)
+    flask_thread.start()
+    logger.info("🌐 Flask server thread started")
+    
+    # Give Flask server a moment to start
+    await asyncio.sleep(2)
+    
+    # Run the Telegram bot (this will block)
+    await run_bot()
+
+# Global bot instance for webhook mode
+bot_instance = None
+
+# Webhook route for Telegram
+@app.route(f'/webhook', methods=['POST'])
+def webhook():
+    """Handle incoming Telegram webhooks"""
+    try:
+        if not bot_instance:
+            return jsonify({"error": "Bot not initialized"}), 500
+            
+        # Get the update from Telegram
+        update_dict = request.get_json()
+        if update_dict:
+            # Process the update asynchronously
+            from telegram import Update
+            update = Update.de_json(update_dict, bot_instance.bot)
+            if update:
+                # Process update in background thread
+                import asyncio
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+                loop.run_until_complete(bot_instance.application.process_update(update))
+        
+        return jsonify({"status": "ok"})
+    except Exception as e:
+        logger.error(f"Webhook error: {e}")
+        return jsonify({"error": str(e)}), 500
+
+# Initialize bot for webhook mode
+def initialize_bot_webhook():
+    """Initialize bot for webhook mode"""
+    global bot_instance
+    try:
+        if not Config.TELEGRAM_BOT_TOKEN:
+            logger.error("❌ TELEGRAM_BOT_TOKEN not provided!")
+            bot_status["running"] = False
+            return
+            
+        # Create bot instance
+        bot_instance = TelegramBot()
+        bot_instance.application = Application.builder().token(Config.TELEGRAM_BOT_TOKEN).build()
+        bot_instance.bot = bot_instance.application.bot
+        
+        # Add handlers
+        bot_instance.application.add_handler(CommandHandler("start", bot_instance.start_command))
+        bot_instance.application.add_handler(CommandHandler("help", bot_instance.help_command))
+        bot_instance.application.add_handler(CommandHandler("stats", bot_instance.stats_command))
+        bot_instance.application.add_handler(CallbackQueryHandler(bot_instance.check_membership_callback, pattern="check_membership"))
+        bot_instance.application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, bot_instance.handle_url))
+        
+        # Initialize the application (async initialization)
+        import asyncio
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        loop.run_until_complete(bot_instance.application.initialize())
+        
+        # Update status
+        bot_status["running"] = True
+        bot_status["last_update"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S UTC")
+        bot_status["bot_instance"] = "webhook_mode"
+        
+        logger.info("✅ Bot initialized in webhook mode")
+        return True
+        
+    except Exception as e:
+        logger.error(f"❌ Bot webhook initialization error: {e}")
+        bot_status["running"] = False
+        return False
+
+# Initialize bot for production (webhook mode)
+if Config.TELEGRAM_BOT_TOKEN and not os.environ.get('DISABLE_BOT_STARTUP'):
+    if initialize_bot_webhook():
+        logger.info("🚀 Bot ready for webhook mode")
+    else:
+        logger.error("❌ Bot initialization failed")
+else:
+    logger.warning("⚠️ Bot startup disabled or no token found")
+    bot_status["running"] = False
 
 if __name__ == "__main__":
     try:
         asyncio.run(main())
     except KeyboardInterrupt:
         logger.info("Enhanced bot stopped by user")
+        bot_status["running"] = False
     except Exception as e:
         logger.error(f"Enhanced bot crashed: {e}")
+        bot_status["running"] = False
         sys.exit(1)
