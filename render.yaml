@@ -21,13 +21,13 @@ services:
         sync: false
       - key: PORT
         sync: false
-      
+
       # Instagram authentication
       - key: INSTAGRAM_SESSIONID
         sync: false
       - key: INSTAGRAM_CSRF_TOKEN
         sync: false
-      
+
       # Twitter cookies
       - key: TWITTER_AUTH_TOKEN
         sync: false
@@ -41,7 +41,7 @@ services:
         sync: false
       - key: TWITTER_CUID
         sync: false
-      
+
       # Facebook cookies
       - key: FACEBOOK_CUSER
         sync: false
@@ -51,7 +51,7 @@ services:
         sync: false
       - key: FACEBOOK_DATR
         sync: false
-      
+
       # YouTube cookies
       - key: YOUTUBE_SAPISID
         sync: false
@@ -61,7 +61,7 @@ services:
         sync: false
       - key: YOUTUBE_SID
         sync: false
-      
+
       # Telegram API
       - key: TELEGRAM_API_ID
         sync: false
@@ -69,7 +69,7 @@ services:
         sync: false
       - key: TELETHON_BOT_TOKEN
         sync: false
-      
+
       # API endpoints
       - key: TIKTOK_API
         sync: false
@@ -77,5 +77,5 @@ services:
         sync: false
       - key: TWITTER_API
         sync: false
-        
+
     healthCheckPath: /health
