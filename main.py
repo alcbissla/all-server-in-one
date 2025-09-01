@@ -14,7 +14,6 @@ import tempfile
 import shutil
 import logging
 import json
-import re
 from pathlib import Path
 from typing import Optional, Dict, Any, List, Tuple
 from urllib.parse import urlparse, parse_qs
@@ -26,7 +25,14 @@ import aiohttp
 from aiofiles import open as aopen
 import nest_asyncio
 
-# Telegram bot
+# URL validation and parsing
+import re
+import urllib.parse
+import validators
+import tldextract
+import rfc3987
+
+# Telegram bot with standard imports
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Bot, Update
 from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, ContextTypes, filters
 from telegram.constants import ParseMode
@@ -58,6 +64,14 @@ import threading
 
 # Load environment variables
 load_dotenv()
+
+# URL validation regex as requested
+url_regex = re.compile(
+    r'https?://'  # http:// or https://
+    r'[\w\-.]+' # domain name (letters, digits, -, .)
+    r'(?::\d+)?' # optional port, like :8080
+    r'(?:/[^\s<>"\')}]*)?'  # path and query string, avoids ending punctuation
+)
 
 # Verify bot token is loaded
 if not os.getenv("TELEGRAM_BOT_TOKEN"):
@@ -110,11 +124,30 @@ class Config:
     FACEBOOK_API = os.getenv("FACEBOOK_API", "https://myapi-2f5b.onrender.com/fbvideo/search?url=")
     TWITTER_API = os.getenv("TWITTER_API", "https://twitsave.com/info?url=")
 
-    # Authentication
+    # Authentication - All cookies from .env file
     INSTAGRAM_SESSIONID = os.getenv("INSTAGRAM_SESSIONID", "")
+    INSTAGRAM_CSRF_TOKEN = os.getenv("INSTAGRAM_CSRF_TOKEN", "")
+
+    # Twitter cookies for enhanced functionality
     TWITTER_AUTH_TOKEN = os.getenv("TWITTER_AUTH_TOKEN", "")
+    TWITTER_CT0 = os.getenv("TWITTER_CT0", "")
+    TWITTER_TWID = os.getenv("TWITTER_TWID", "")
+    TWITTER_GUEST_ID = os.getenv("TWITTER_GUEST_ID", "")
+    TWITTER_CF_CLEARANCE = os.getenv("TWITTER_CF_CLEARANCE", "")
+    TWITTER_CUID = os.getenv("TWITTER_CUID", "")
+
+    # Facebook cookies for better access
     FACEBOOK_CUSER = os.getenv("FACEBOOK_CUSER", "")
     FACEBOOK_XS = os.getenv("FACEBOOK_XS", "")
+    FACEBOOK_FR = os.getenv("FACEBOOK_FR", "")
+    FACEBOOK_DATR = os.getenv("FACEBOOK_DATR", "")
+
+    # YouTube cookies for enhanced access
+    YOUTUBE_SAPISID = os.getenv("YOUTUBE_SAPISID", "")
+    YOUTUBE_SECURE_3PSID = os.getenv("YOUTUBE_SECURE_3PSID", "")
+    YOUTUBE_APISID = os.getenv("YOUTUBE_APISID", "")
+    YOUTUBE_SID = os.getenv("YOUTUBE_SID", "")
+
     TELEGRAM_API_ID = int(os.getenv("TELEGRAM_API_ID", "0"))
     TELEGRAM_API_HASH = os.getenv("TELEGRAM_API_HASH", "")
 
@@ -333,15 +366,15 @@ class ProgressTracker:
         self.speed_samples = []
 
     async def update_progress(self, current: int, total: int, speed: str = "", stage: str = "Downloading"):
-        """Enhanced progress update with speed calculation"""
+        """Enhanced progress update with better speed calculation and ETA"""
         now = time.time()
-        if now - self.last_update < 1.5:  # Update every 1.5 seconds
+        if now - self.last_update < 1.2:  # Update every 1.2 seconds for smoother progress
             return
 
         percentage = (current / total) * 100 if total > 0 else 0
         progress_bar = "█" * int(percentage // 5) + "░" * (20 - int(percentage // 5))
 
-        # Calculate speed if not provided
+        # Enhanced speed calculation
         if not speed and current > self.last_bytes:
             elapsed = now - self.last_update if self.last_update > 0 else 1
             bytes_per_sec = (current - self.last_bytes) / elapsed
@@ -352,32 +385,54 @@ class ProgressTracker:
                 self.speed_samples.pop(0)
 
             avg_speed = sum(self.speed_samples) / len(self.speed_samples)
-            speed = f"{avg_speed/1024/1024:.1f} MB/s"
+            if avg_speed > 1024 * 1024:  # > 1 MB/s
+                speed = f"{avg_speed/1024/1024:.1f} MB/s"
+            elif avg_speed > 1024:  # > 1 KB/s
+                speed = f"{avg_speed/1024:.0f} KB/s"
+            else:
+                speed = f"{avg_speed:.0f} B/s"
 
-        # Calculate ETA
+        # Enhanced ETA calculation
         eta_str = ""
-        if total > current and speed and "MB/s" in speed:
+        if total > current and speed:
             try:
-                speed_val = float(speed.split()[0])
-                remaining_mb = (total - current) / (1024 * 1024)
-                eta_seconds = remaining_mb / speed_val if speed_val > 0 else 0
+                if "MB/s" in speed:
+                    speed_val = float(speed.split()[0])
+                    remaining_mb = (total - current) / (1024 * 1024)
+                    eta_seconds = remaining_mb / speed_val if speed_val > 0 else 0
+                elif "KB/s" in speed:
+                    speed_val = float(speed.split()[0])
+                    remaining_kb = (total - current) / 1024
+                    eta_seconds = remaining_kb / speed_val if speed_val > 0 else 0
+                else:
+                    eta_seconds = 0
+
                 if eta_seconds > 0:
-                    eta_str = f" • ETA: {int(eta_seconds)}s"
+                    if eta_seconds > 60:
+                        eta_str = f" • ETA: {int(eta_seconds//60)}m {int(eta_seconds%60)}s"
+                    else:
+                        eta_str = f" • ETA: {int(eta_seconds)}s"
             except:
                 pass
 
-        text = f"{'📥' if stage == 'Downloading' else '📤'} **{stage}...**\n\n"
+        # Enhanced progress text with emojis
+        emoji = {'Downloading': '📥', 'Uploading': '📤', 'Processing': '🔄'}.get(stage, '📊')
+        text = f"{emoji} **{stage}...**\n\n"
         text += f"`{progress_bar}` {percentage:.1f}%\n"
         text += f"📊 **Size:** {self._format_bytes(current)} / {self._format_bytes(total)}\n"
         if speed:
             text += f"🚀 **Speed:** {speed}{eta_str}\n"
+
+        # Add estimated completion time for large files
+        if total > 50 * 1024 * 1024:  # Files larger than 50MB
+            text += f"⏱️ **Please wait, processing large file...**"
 
         try:
             await self.bot.edit_message_text(
                 chat_id=self.chat_id,
                 message_id=self.message_id,
                 text=text,
-                parse_mode=ParseMode.MARKDOWN
+                parse_mode='Markdown'
             )
             self.last_update = now
             self.last_bytes = current
@@ -396,7 +451,7 @@ class ProgressTracker:
                 chat_id=self.chat_id,
                 message_id=self.message_id,
                 text=text,
-                parse_mode=ParseMode.MARKDOWN
+
             )
         except Exception as e:
             logger.warning(f"Failed to update compression progress: {e}")
@@ -434,19 +489,22 @@ class SocialMediaDownloader:
             pass
 
     async def get_platform(self, url: str) -> str:
-        """Detect platform from URL"""
-        url_lower = url.lower()
-        if any(domain in url_lower for domain in ['youtube.com', 'youtu.be']):
+        """Detect platform from URL with enhanced pattern matching"""
+        url_lower = url.lower().strip()
+
+        # Enhanced YouTube detection
+        if any(domain in url_lower for domain in ['youtube.com', 'youtu.be', 'youtube-nocookie.com']):
             return 'youtube'
-        elif any(domain in url_lower for domain in ['facebook.com', 'fb.com']):
-            return 'facebook'
-        elif 'tiktok.com' in url_lower:
-            return 'tiktok'
-        elif any(domain in url_lower for domain in ['twitter.com', 'x.com']):
+        # Enhanced Twitter/X detection
+        elif any(domain in url_lower for domain in ['twitter.com', 'x.com', 'mobile.twitter.com', 'mobile.x.com']):
             return 'twitter'
-        elif 'instagram.com' in url_lower:
+        elif any(domain in url_lower for domain in ['facebook.com', 'fb.com', 'fb.watch', 'm.facebook.com']):
+            return 'facebook'
+        elif any(domain in url_lower for domain in ['tiktok.com', 'vm.tiktok.com', 'm.tiktok.com']):
+            return 'tiktok'
+        elif any(domain in url_lower for domain in ['instagram.com', 'instagr.am']):
             return 'instagram'
-        elif url_lower.endswith('.m3u8'):
+        elif url_lower.endswith('.m3u8') or 'm3u8' in url_lower:
             return 'm3u8'
         elif any(ext in url_lower for ext in ['.mp4', '.mkv', '.avi', '.webm', '.mov']):
             return 'direct'
@@ -454,6 +512,114 @@ class SocialMediaDownloader:
             return 'unknown'
 
     @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=4, max=10))
+    async def _get_video_quality_info(self, url: str, platform: str):
+        """Get detailed video quality information including file sizes and available formats"""
+        try:
+            import subprocess
+            import json
+
+            # Enhanced yt-dlp command to get comprehensive format info
+            cmd = [
+                'yt-dlp',
+                '--dump-json',
+                '--no-download',
+                '--no-check-certificates',
+                '--no-warnings',
+                '--socket-timeout', '45',
+                '--list-formats',  # Get format list
+                '--user-agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                url
+            ]
+
+            result = await asyncio.create_subprocess_exec(
+                *cmd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE
+            )
+
+            stdout, stderr = await asyncio.wait_for(result.communicate(), timeout=60)
+
+            if result.returncode == 0 and stdout:
+                lines = stdout.decode().strip().split('\n')
+                for line in lines:
+                    if line.strip():
+                        try:
+                            info = json.loads(line)
+                            if 'formats' in info:
+                                # Enhanced format filtering with proper quality mapping
+                                video_formats = []
+                                audio_formats = []
+
+                                for fmt in info['formats']:
+                                    # Video formats with specific quality levels
+                                    if fmt.get('height') and fmt.get('vcodec') != 'none':
+                                        height = fmt['height']
+                                        filesize = fmt.get('filesize') or fmt.get('filesize_approx') or 0
+
+                                        # Map to standard quality levels
+                                        quality_level = None
+                                        if height >= 2160:
+                                            quality_level = '4K'
+                                        elif height >= 1440:
+                                            quality_level = '1440p'
+                                        elif height >= 1080:
+                                            quality_level = '1080p'
+                                        elif height >= 720:
+                                            quality_level = '720p'
+                                        elif height >= 480:
+                                            quality_level = '480p'
+                                        elif height >= 360:
+                                            quality_level = '360p'
+
+                                        if quality_level:
+                                            fmt['quality_level'] = quality_level
+                                            fmt['filesize_mb'] = filesize / (1024 * 1024) if filesize > 0 else 0
+                                            video_formats.append(fmt)
+
+                                    # Audio-only formats with accurate size calculation
+                                    elif fmt.get('acodec') != 'none' and fmt.get('vcodec') == 'none':
+                                        filesize = fmt.get('filesize') or fmt.get('filesize_approx') or 0
+                                        abr = fmt.get('abr', 0)
+                                        duration = info.get('duration', 0)
+                                        
+                                        # Accurate audio size calculation
+                                        if filesize:
+                                            actual_size = filesize
+                                        elif abr and duration:
+                                            # Convert kbps to bytes: (kbps * duration_seconds * 1000) / 8
+                                            actual_size = (abr * duration * 1000) / 8
+                                        else:
+                                            # Default estimation for good quality audio
+                                            actual_size = (160 * duration * 1000) / 8 if duration else 8 * 1024 * 1024
+                                        
+                                        fmt['filesize'] = max(actual_size, 2 * 1024 * 1024)  # Minimum 2MB for quality
+                                        fmt['filesize_mb'] = fmt['filesize'] / (1024 * 1024)
+                                        audio_formats.append(fmt)
+
+                                # Remove duplicates and sort by quality
+                                unique_video_formats = []
+                                seen_qualities = set()
+
+                                for fmt in sorted(video_formats, key=lambda x: x.get('height', 0), reverse=True):
+                                    quality = fmt.get('quality_level')
+                                    if quality and quality not in seen_qualities:
+                                        unique_video_formats.append(fmt)
+                                        seen_qualities.add(quality)
+                                        if len(unique_video_formats) >= 6:  # Limit to 6 qualities
+                                            break
+
+                                info['video_formats'] = unique_video_formats
+                                info['audio_formats'] = audio_formats[:3]  # Top 3 audio formats
+
+                                return info
+                        except json.JSONDecodeError:
+                            continue
+
+        except Exception as e:
+            logger.error(f"Error getting enhanced quality info: {e}")
+
+        return None
+
     async def download_with_yt_dlp(self, url: str, progress_tracker: ProgressTracker) -> Tuple[Optional[str], Optional[Dict]]:
         """Enhanced yt-dlp download with progressive quality selection for YouTube"""
         try:
@@ -505,6 +671,7 @@ class SocialMediaDownloader:
         import json
 
         # Get video info first
+        # Enhanced YouTube command with cookie support
         info_cmd = [
             'yt-dlp',
             '--dump-json',
@@ -513,9 +680,28 @@ class SocialMediaDownloader:
             '--no-check-certificates',
             '--no-warnings',
             '--socket-timeout', '60',
+            '--retries', '10',
+            '--fragment-retries', '10',
             '--user-agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            '--extractor-args', 'youtube:player_client=web,mweb',
             url
         ]
+
+        # Add YouTube cookies if available
+        if Config.YOUTUBE_SAPISID:
+            cookie_file = f"{self.temp_dir}/youtube_cookies.txt"
+            with open(cookie_file, 'w') as f:
+                f.write("# Netscape HTTP Cookie File\n")
+                f.write("# This is a generated file! Do not edit.\n\n")
+                if Config.YOUTUBE_SAPISID:
+                    f.write(f".youtube.com\tTRUE\t/\tTRUE\t0\tSAPISID\t{Config.YOUTUBE_SAPISID}\n")
+                if Config.YOUTUBE_SECURE_3PSID:
+                    f.write(f".youtube.com\tTRUE\t/\tTRUE\t0\t__Secure-3PSID\t{Config.YOUTUBE_SECURE_3PSID}\n")
+                if Config.YOUTUBE_APISID:
+                    f.write(f".youtube.com\tTRUE\t/\tTRUE\t0\tAPISID\t{Config.YOUTUBE_APISID}\n")
+                if Config.YOUTUBE_SID:
+                    f.write(f".youtube.com\tTRUE\t/\tTRUE\t0\tSID\t{Config.YOUTUBE_SID}\n")
+            info_cmd.extend(['--cookies', cookie_file])
 
         info_result = subprocess.run(
             info_cmd,
@@ -561,8 +747,13 @@ class SocialMediaDownloader:
                 '--progress',
                 '--newline',
                 '--user-agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                '--extractor-args', 'youtube:player_client=web,mweb',
                 url
             ]
+
+            # Add cookies to download command if available
+            if Config.YOUTUBE_SAPISID and 'cookie_file' in locals():
+                download_cmd.extend(['--cookies', cookie_file])
 
             return subprocess.run(
                 download_cmd,
@@ -777,7 +968,9 @@ class SocialMediaDownloader:
             elif platform == 'facebook':
                 api_url = Config.FACEBOOK_API + url
             elif platform == 'twitter':
-                api_url = Config.TWITTER_API + url
+                # Enhanced Twitter URL handling
+                cleaned_url = url.replace('x.com', 'twitter.com')
+                api_url = Config.TWITTER_API + cleaned_url
 
             if not api_url:
                 return None, None
@@ -818,12 +1011,25 @@ class SocialMediaDownloader:
                     'platform': 'facebook'
                 }
             elif platform == 'twitter':
-                # Handle Twitter API response
+                # Enhanced Twitter API response handling
+                download_url = None
                 if 'url' in data:
                     download_url = data['url']
+                elif 'download' in data and isinstance(data['download'], list) and len(data['download']) > 0:
+                    # Some Twitter APIs return download URLs in an array
+                    download_url = data['download'][0].get('url')
+                elif 'media' in data and isinstance(data['media'], list):
+                    # Handle media array format
+                    for media in data['media']:
+                        if media.get('type') == 'video' and 'url' in media:
+                            download_url = media['url']
+                            break
+
+                if download_url:
                     metadata = {
-                        'title': data.get('title', 'Twitter Video'),
-                        'description': data.get('description', ''),
+                        'title': data.get('title', data.get('text', 'Twitter Video'))[:100],
+                        'description': data.get('description', data.get('text', ''))[:200],
+                        'uploader': data.get('author', data.get('user', {}).get('name', '')),
                         'platform': 'twitter'
                     }
 
@@ -838,26 +1044,56 @@ class SocialMediaDownloader:
         return None, None
 
     async def download_with_cookies(self, url: str, platform: str, progress_tracker: ProgressTracker) -> Tuple[Optional[str], Optional[Dict]]:
-        """Enhanced cookie-based download"""
+        """Enhanced cookie-based download with all .env cookies applied"""
         try:
-            logger.info(f"Trying cookie-based download for {platform}")
+            logger.info(f"Trying enhanced cookie-based download for {platform}")
 
-            # Prepare cookies for different platforms
+            # Prepare enhanced cookies for different platforms from .env
             cookies = {}
             headers = {
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
             }
 
-            if platform == 'instagram' and Config.INSTAGRAM_SESSIONID:
-                cookies['sessionid'] = Config.INSTAGRAM_SESSIONID
-                headers['X-IG-App-ID'] = '936619743392459'
+            if platform == 'instagram':
+                if Config.INSTAGRAM_SESSIONID:
+                    cookies['sessionid'] = Config.INSTAGRAM_SESSIONID
+                    headers['X-IG-App-ID'] = '936619743392459'
+                if Config.INSTAGRAM_CSRF_TOKEN:
+                    cookies['csrftoken'] = Config.INSTAGRAM_CSRF_TOKEN
 
-            elif platform == 'facebook' and Config.FACEBOOK_CUSER and Config.FACEBOOK_XS:
-                cookies['c_user'] = Config.FACEBOOK_CUSER
-                cookies['xs'] = Config.FACEBOOK_XS
+            elif platform == 'facebook':
+                if Config.FACEBOOK_CUSER:
+                    cookies['c_user'] = Config.FACEBOOK_CUSER
+                if Config.FACEBOOK_XS:
+                    cookies['xs'] = Config.FACEBOOK_XS
+                if Config.FACEBOOK_FR:
+                    cookies['fr'] = Config.FACEBOOK_FR
+                if Config.FACEBOOK_DATR:
+                    cookies['datr'] = Config.FACEBOOK_DATR
 
-            elif platform == 'twitter' and Config.TWITTER_AUTH_TOKEN:
-                cookies['auth_token'] = Config.TWITTER_AUTH_TOKEN
+            elif platform == 'twitter':
+                if Config.TWITTER_AUTH_TOKEN:
+                    cookies['auth_token'] = Config.TWITTER_AUTH_TOKEN
+                if Config.TWITTER_CT0:
+                    cookies['ct0'] = Config.TWITTER_CT0
+                if Config.TWITTER_TWID:
+                    cookies['twid'] = Config.TWITTER_TWID
+                if Config.TWITTER_GUEST_ID:
+                    cookies['guest_id'] = Config.TWITTER_GUEST_ID
+                if Config.TWITTER_CF_CLEARANCE:
+                    cookies['cf_clearance'] = Config.TWITTER_CF_CLEARANCE
+                if Config.TWITTER_CUID:
+                    cookies['_cuid'] = Config.TWITTER_CUID
+
+            elif platform == 'youtube':
+                if Config.YOUTUBE_SAPISID:
+                    cookies['SAPISID'] = Config.YOUTUBE_SAPISID
+                if Config.YOUTUBE_SECURE_3PSID:
+                    cookies['__Secure-3PSID'] = Config.YOUTUBE_SECURE_3PSID
+                if Config.YOUTUBE_APISID:
+                    cookies['APISID'] = Config.YOUTUBE_APISID
+                if Config.YOUTUBE_SID:
+                    cookies['SID'] = Config.YOUTUBE_SID
 
             if not cookies:
                 logger.warning(f"No cookies available for {platform}")
@@ -907,11 +1143,31 @@ class SocialMediaDownloader:
                             else:
                                 return None, None
 
+                        # Read metadata from info.json file if available
+                        info_file = str(file).replace(file.suffix, '.info.json')
                         metadata = {
                             'title': f'{platform.title()} Video',
-                            'description': 'Downloaded with cookies',
+                            'description': 'Downloaded with enhanced method',
                             'platform': platform
                         }
+                        
+                        if os.path.exists(info_file):
+                            try:
+                                with open(info_file, 'r', encoding='utf-8') as f:
+                                    info_data = json.load(f)
+                                    metadata.update({
+                                        'title': info_data.get('title', metadata['title']),
+                                        'description': info_data.get('description', metadata['description']),
+                                        'uploader': info_data.get('uploader', ''),
+                                        'duration': info_data.get('duration'),
+                                        'upload_date': info_data.get('upload_date', ''),
+                                        'view_count': info_data.get('view_count'),
+                                        'like_count': info_data.get('like_count')
+                                    })
+                                logger.info(f"Enhanced filename: {metadata['title'][:30]}_{platform.upper()}{file.suffix}")
+                            except Exception as e:
+                                logger.warning(f"Could not read info file: {e}")
+                        
                         return str(file), metadata
             else:
                 logger.error(f"Cookie-based download failed: {result.stderr}")
@@ -1393,7 +1649,7 @@ class SocialMediaDownloader:
                     return result
 
             # Try yt-dlp with quality format
-            result = await self._download_with_ytdlp_quality(url, quality_format, progress_tracker)
+            result = await self._download_with_ytdlp_quality(url, quality_format, quality_type, progress_tracker)
             if result[0]:
                 logger.info("✅ Priority 1 SUCCESS: yt-dlp")
                 return result
@@ -1457,12 +1713,12 @@ class SocialMediaDownloader:
                     os.unlink(file_path)  # Remove original video
                 except:
                     pass
-                
+
                 # Update metadata for audio
                 if metadata:
                     metadata['title'] = f"{metadata.get('title', 'Audio')} [Audio Only]"
                     metadata['format'] = 'mp3'
-                
+
                 return audio_file, metadata
 
         # For video downloads, ensure proper file naming with title and description
@@ -1484,38 +1740,42 @@ class SocialMediaDownloader:
         title = metadata.get('title', 'Video')
         description = metadata.get('description', '')
         platform = metadata.get('platform', 'unknown')
-        
+
         # Sanitize title for filename
         safe_title = self._sanitize_filename(title)[:50]  # Limit title length
-        
-        # Add quality indicator
+
+        # Add quality indicator for new quality types
         quality_suffix = {
+            "1080p": "_1080p",
+            "720p": "_720p",
+            "480p": "_480p", 
+            "360p": "_360p",
+            "audio": "_MP3",
             "hd": "_HD",
-            "sd": "_SD", 
-            "audio": "_Audio",
+            "sd": "_SD",
             "best": "_Best"
         }.get(quality_type, "")
-        
+
         # Add description if available (limit length)
         desc_part = ""
         if description:
             safe_desc = self._sanitize_filename(description)[:30]
             desc_part = f"_[{safe_desc}]"
-        
+
         # Get file extension
         original_ext = ".mp4"
         if quality_type == "audio":
             original_ext = ".mp3"
         elif metadata.get('format'):
             original_ext = f".{metadata['format']}"
-        
+
         # Construct enhanced filename
         filename = f"{safe_title}{quality_suffix}{desc_part}_{platform.upper()}{original_ext}"
-        
+
         # Ensure filename isn't too long
         if len(filename) > 255:
             filename = f"{safe_title[:30]}{quality_suffix}_{platform.upper()}{original_ext}"
-        
+
         return filename
 
     def _sanitize_filename(self, filename: str) -> str:
@@ -1537,7 +1797,7 @@ class SocialMediaDownloader:
         except:
             return "direct_video"
 
-    async def _download_with_ytdlp_quality(self, url: str, quality_format: str, progress_tracker: ProgressTracker) -> Tuple[Optional[str], Optional[Dict]]:
+    async def _download_with_ytdlp_quality(self, url: str, quality_format: str, quality_type: str, progress_tracker: ProgressTracker) -> Tuple[Optional[str], Optional[Dict]]:
         """Download with yt-dlp using specific quality format"""
         try:
             import subprocess
@@ -1578,15 +1838,18 @@ class SocialMediaDownloader:
             platform = await self.get_platform(url)
             output_template = f'{self.temp_dir}/{title}_{platform}.%(ext)s'
 
-            # Download with specified quality
+            # Download with specified quality - skip problematic flags for audio
             download_cmd = [
                 'yt-dlp', '--format', quality_format,
                 '--output', output_template,
-                '--no-check-certificates',
-                '--merge-output-format', 'mp4',
-                '--embed-thumbnail', '--add-metadata',
-                url
+                '--no-check-certificates'
             ]
+            
+            # Add format and metadata flags only for video downloads to avoid ffmpeg issues
+            if not quality_format.startswith('bestaudio') and 'audio' not in quality_type:
+                download_cmd.extend(['--merge-output-format', 'mp4', '--embed-thumbnail', '--add-metadata'])
+            
+            download_cmd.append(url)
 
             result = subprocess.run(download_cmd, capture_output=True, text=True, timeout=300, check=False)
             if result.returncode != 0:
@@ -1614,7 +1877,7 @@ class SocialMediaDownloader:
         """Download Instagram content using instaloader package"""
         try:
             import instaloader
-            
+
             await progress_tracker.update_compression_progress(
                 "Instagram instaloader",
                 "Extracting Instagram content..."
@@ -1635,7 +1898,7 @@ class SocialMediaDownloader:
             shortcode_match = re.search(r'/p/([A-Za-z0-9_-]+)', url)
             if not shortcode_match:
                 shortcode_match = re.search(r'/reel/([A-Za-z0-9_-]+)', url)
-            
+
             if not shortcode_match:
                 raise Exception("Could not extract Instagram shortcode from URL")
 
@@ -1669,9 +1932,9 @@ class SocialMediaDownloader:
         """Extract audio from video as MP3"""
         try:
             from moviepy.editor import VideoFileClip
-            
+
             output_path = video_path.rsplit('.', 1)[0] + '.mp3'
-            
+
             await progress_tracker.update_compression_progress(
                 "Audio Extraction",
                 "Converting to MP3 format..."
@@ -1724,7 +1987,9 @@ class TelegramBot:
         welcome_text += f"• 📸 Instagram\n• 🎥 M3U8 Streams\n• 📁 Direct MP4/MKV links\n\n"
         welcome_text += f"💎 **Enhanced Features:**\n"
         welcome_text += f"• ⚡ Ultra-fast compression\n• 🎯 Up to 2GB file size\n"
-        welcome_text += f"• 📊 Real-time download/upload progress\n• 🚀 Smart quality selection\n• 🔄 Multi-tier fallback system\n\n"
+        welcome_text += f"• 📊 Real-time download/upload progress\n• 🚀 Smart quality selection\n• 🔄 Multi-tier fallback system\n"
+        welcome_text += f"• 📦 Priority: packages → API → cookies\n\n"
+        welcome_text += f"👨‍💻 **Bot Developer:** {Config.DEVELOPER_CREDIT}\n\n"
         welcome_text += f"**First, please join our channel:**"
 
         keyboard = [
@@ -1740,14 +2005,14 @@ class TelegramBot:
                 photo="https://i.ibb.co/kg35pgYt/dc3941a3cc.jpg",
                 caption=welcome_text,
                 reply_markup=reply_markup,
-                parse_mode=ParseMode.MARKDOWN
+
             )
         except Exception as e:
             # Fallback to text message if image fails
             await update.message.reply_text(
                 welcome_text,
                 reply_markup=reply_markup,
-                parse_mode=ParseMode.MARKDOWN
+
             )
 
     async def check_membership_callback(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1784,12 +2049,12 @@ class TelegramBot:
             try:
                 await query.edit_message_caption(
                     caption=success_text,
-                    parse_mode=ParseMode.MARKDOWN
+
                 )
             except Exception:
                 await query.message.reply_text(
                     success_text,
-                    parse_mode=ParseMode.MARKDOWN
+
                 )
         else:
             # User is not a member
@@ -1808,13 +2073,13 @@ class TelegramBot:
                 await query.edit_message_caption(
                     caption=not_member_text,
                     reply_markup=reply_markup,
-                    parse_mode=ParseMode.MARKDOWN
+
                 )
             except Exception:
                 await query.message.reply_text(
                     not_member_text,
                     reply_markup=reply_markup,
-                    parse_mode=ParseMode.MARKDOWN
+
                 )
 
     async def handle_url(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1827,16 +2092,36 @@ class TelegramBot:
         if chat_id not in user_states or not user_states[chat_id].get("joined_channel", False):
             await update.message.reply_text(
                 "❌ Please join our channel first by using /start command!",
-                parse_mode=ParseMode.MARKDOWN
+
             )
             return
 
-        # Validate URL
-        url_pattern = re.compile(
-            r'http[s]?://(?:[a-zA-Z]|[0-9]|[$-_@.&+]|[!*\\(\\),]|(?:%[0-9a-fA-F][0-9a-fA-F]))+'
-        )
+        # Better URL validation and normalization
+        url_text = message_text.strip()
 
-        if not url_pattern.match(message_text):
+        # Handle partial URLs (like /eBl_3AB0lCs?si=kPFo3Lca0TVtP4_M)
+        if url_text.startswith('/'):
+            # Extract video ID from YouTube format
+            if re.match(r'^/[a-zA-Z0-9_-]{11}', url_text):  # YouTube video ID pattern
+                video_id = url_text[1:].split('?')[0]
+                url_text = f"https://www.youtube.com/watch?v={video_id}"
+            # Handle Twitter status URLs
+            elif '/status/' in url_text:
+                url_text = f"https://twitter.com{url_text}"
+            # Handle Twitter user/status format
+            elif url_text.count('/') >= 2:
+                url_text = f"https://twitter.com{url_text}"
+            else:
+                # Default to YouTube for single video IDs
+                video_id = url_text[1:].split('?')[0]
+                url_text = f"https://www.youtube.com/watch?v={video_id}"
+
+        # Add https if missing
+        if not url_text.startswith(('http://', 'https://')):
+            if any(domain in url_text for domain in ['youtube.com', 'youtu.be', 'twitter.com', 'x.com', 'facebook.com', 'instagram.com', 'tiktok.com']):
+                url_text = f"https://{url_text}"
+
+        if not url_regex.match(url_text):
             await update.message.reply_text(
                 "❌ Please send a valid video URL!\n\n"
                 "Supported platforms:\n"
@@ -1844,48 +2129,133 @@ class TelegramBot:
                 "• Facebook • TikTok • Twitter/X\n"
                 "• Instagram • M3U8 streams\n"
                 "• Direct video links\n\n"
-                f"👨‍💻 **Developer:** {Config.DEVELOPER_CREDIT}",
-                parse_mode=ParseMode.MARKDOWN
+                f"Developer: {Config.DEVELOPER_CREDIT}"
             )
             return
 
         # Store URL in user state for quality selection
         if chat_id not in user_states:
             user_states[chat_id] = {}
-        user_states[chat_id]["pending_url"] = message_text
+        user_states[chat_id]["pending_url"] = url_text
 
         # Detect platform for quality options
         async with SocialMediaDownloader() as downloader:
-            platform = await downloader.get_platform(message_text)
+            platform = await downloader.get_platform(url_text)
 
-        # Create quality selection buttons
-        keyboard = [
-            [
-                InlineKeyboardButton("📺 HD Quality", callback_data=f"quality_hd_{chat_id}"),
-                InlineKeyboardButton("📱 SD Quality", callback_data=f"quality_sd_{chat_id}")
-            ],
-            [
-                InlineKeyboardButton("🎵 Audio Only", callback_data=f"quality_audio_{chat_id}"),
-                InlineKeyboardButton("🎯 Best Available", callback_data=f"quality_best_{chat_id}")
+        # Dynamic quality selection buttons based on actual available qualities
+        keyboard = []
+
+        # Get quality info to show only available qualities
+        async with SocialMediaDownloader() as temp_downloader:
+            quality_info = await temp_downloader._get_video_quality_info(url_text, platform)
+
+        available_qualities = []
+        if quality_info and 'video_formats' in quality_info:
+            for fmt in quality_info['video_formats']:
+                quality = fmt.get('quality_level')
+                filesize_mb = fmt.get('filesize_mb', 0)
+                if quality:
+                    # Show MB in buttons as requested
+                    if filesize_mb > 0:
+                        size_text = f" • {filesize_mb:.0f}MB"
+                        button_text = f"{quality}{size_text}"
+                    else:
+                        button_text = f"{quality} • Auto"
+                    available_qualities.append((quality, button_text))
+
+        # Fallback to standard qualities if no specific info available
+        if not available_qualities:
+            available_qualities = [
+                ('4K', '4K • Auto'),
+                ('1440p', '1440p • Auto'),
+                ('1080p', '1080p • Auto'),
+                ('720p', '720p • Auto'),
+                ('480p', '480p • Auto'),
+                ('360p', '360p • Auto')
             ]
-        ]
+
+        # Create buttons for available video qualities
+        quality_buttons = []
+        for i in range(0, len(available_qualities), 2):
+            row = []
+            for j in range(2):
+                if i + j < len(available_qualities):
+                    quality_code, quality_display = available_qualities[i + j]
+                    emoji = {
+                        '4K': '🌟',
+                        '1440p': '🔥', 
+                        '1080p': '⭐',
+                        '720p': '✨',
+                        '480p': '✅',
+                        '360p': '💾'
+                    }.get(quality_code, '📹')
+                    row.append(InlineKeyboardButton(
+                        f"{emoji} {quality_display}", 
+                        callback_data=f"quality_{quality_code.lower()}_video"
+                    ))
+            if row:
+                quality_buttons.append(row)
+
+        # Add audio button with size info if available
+        audio_size_text = "Auto"
+        if quality_info and quality_info.get('audio_formats'):
+            audio_fmt = quality_info['audio_formats'][0]
+            audio_size = audio_fmt.get('filesize', 0)
+            if audio_size > 0:
+                audio_mb = audio_size / (1024 * 1024)
+                audio_size_text = f"{audio_mb:.0f}MB"
+
+        audio_button = [InlineKeyboardButton(f"🎵 MP3 Audio • {audio_size_text}", callback_data="quality_audio_mp3")]
+
+        keyboard = quality_buttons + [audio_button]
         reply_markup = InlineKeyboardMarkup(keyboard)
 
-        # Send quality selection message
-        quality_text = f"🎬 **Video Detected!**\n\n"
-        quality_text += f"🔗 **URL:** {message_text[:50]}{'...' if len(message_text) > 50 else ''}\n"
-        quality_text += f"🌐 **Platform:** {platform.title()}\n\n"
-        quality_text += f"📊 **Choose your preferred quality:**\n"
-        quality_text += f"• **HD Quality** - Best video quality (may be larger)\n"
-        quality_text += f"• **SD Quality** - Smaller size, good quality\n"
-        quality_text += f"• **Audio Only** - Extract audio (MP3)\n"
-        quality_text += f"• **Best Available** - Auto-select optimal quality\n\n"
-        quality_text += f"👨‍💻 **Developer:** {Config.DEVELOPER_CREDIT}"
+        # Create enhanced quality selection text with actual available qualities and file sizes
+        quality_text = f"🎬 Video Detected!\n\n"
+        quality_text += f"🔗 URL: {url_text[:50]}{'...' if len(url_text) > 50 else ''}\n"
+        quality_text += f"🌐 Platform: {platform.title()}\n"
+
+        # Add video title if available
+        if quality_info and quality_info.get('title'):
+            title = quality_info['title'][:60]
+            quality_text += f"🎬 Title: {title}\n"
+
+        quality_text += f"\n📊 Available qualities:\n"
+
+        # Show actual quality info with file sizes from enhanced detection
+        if quality_info and 'video_formats' in quality_info and quality_info['video_formats']:
+            for fmt in quality_info['video_formats']:
+                quality = fmt.get('quality_level')
+                filesize_mb = fmt.get('filesize_mb', 0)
+                height = fmt.get('height', 0)
+                if quality:
+                    if filesize_mb > 0:
+                        quality_text += f"• {quality}: {filesize_mb:.0f}MB\n"
+                    else:
+                        quality_text += f"• {quality}: Available\n"
+
+            # Add audio info if available
+            if quality_info.get('audio_formats'):
+                audio_fmt = quality_info['audio_formats'][0]
+                audio_size = audio_fmt.get('filesize', 0)
+                if audio_size > 0:
+                    audio_mb = audio_size / (1024 * 1024)
+                    quality_text += f"• MP3 Audio: {audio_mb:.0f}MB\n"
+                else:
+                    quality_text += f"• MP3 Audio: Available\n"
+        else:
+            # Fallback to generic quality info
+            quality_text += f"• 4K/1440p/1080p/720p/480p/360p: Various HD qualities\n"
+            quality_text += f"• MP3: Audio only format\n"
+
+        quality_text += f"\n⚡ Priority System: yt-dlp > API > cookies\n"
+        quality_text += f"📁 Download includes: title + description\n"
+        quality_text += f"⏱️ Progress tracking: download + upload\n"
+        quality_text += f"Developer: {Config.DEVELOPER_CREDIT}"
 
         await update.message.reply_text(
             quality_text,
-            reply_markup=reply_markup,
-            parse_mode=ParseMode.MARKDOWN
+            reply_markup=reply_markup
         )
 
     async def handle_quality_selection(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1901,56 +2271,80 @@ class TelegramBot:
         if not callback_data.startswith("quality_"):
             return
 
-        quality_type = callback_data.split("_")[1]  # hd, sd, audio, best
-        user_chat_id = int(callback_data.split("_")[2])
+        # Parse callback data: quality_1080p_video -> 1080p, video
+        parts = callback_data.split("_")
+        if len(parts) >= 3:
+            quality_type = parts[1]  # 1080p, 720p, 480p, 360p, audio
+            format_type = parts[2]   # video, mp3
+        else:
+            quality_type = "1080p"
+            format_type = "video"
 
-        if chat_id != user_chat_id:
-            await query.answer("❌ This is not your download request!", show_alert=True)
-            return
+        # Remove user chat ID check since we're not including it in callback data anymore
 
         # Get the URL from user state
         if chat_id not in user_states or "pending_url" not in user_states[chat_id]:
             await query.edit_message_text(
-                "❌ **Session expired!**\n\n"
+                "❌ Session expired!\n\n"
                 "Please send the video URL again.\n\n"
-                f"👨‍💻 **Developer:** {Config.DEVELOPER_CREDIT}",
-                parse_mode=ParseMode.MARKDOWN
+                f"Developer: {Config.DEVELOPER_CREDIT}"
             )
             return
 
         video_url = user_states[chat_id]["pending_url"]
-        
-        # Quality mapping
+
+        # Enhanced quality mapping with proper format selection
         quality_map = {
-            "hd": "best[height<=1080]/best",
-            "sd": "best[height<=480]/worst", 
-            "audio": "bestaudio/best",
-            "best": "best"
+            "4k": "best[height<=2160][ext=mp4]/bestvideo[height<=2160][ext=mp4]+bestaudio[ext=m4a]/best[height<=2160]",
+            "1440p": "best[height<=1440][ext=mp4]/bestvideo[height<=1440][ext=mp4]+bestaudio[ext=m4a]/best[height<=1440]",
+            "1080p": "best[height<=1080][ext=mp4]/bestvideo[height<=1080][ext=mp4]+bestaudio[ext=m4a]/best[height<=1080]",
+            "720p": "best[height<=720][ext=mp4]/bestvideo[height<=720][ext=mp4]+bestaudio[ext=m4a]/best[height<=720]",
+            "480p": "best[height<=480][ext=mp4]/bestvideo[height<=480][ext=mp4]+bestaudio[ext=m4a]/best[height<=480]",
+            "360p": "best[height<=360][ext=mp4]/bestvideo[height<=360][ext=mp4]+bestaudio[ext=m4a]/best[height<=360]",
+            "audio": "bestaudio[ext=m4a]/bestaudio[ext=mp3]/bestaudio/best"
         }
 
         quality_format = quality_map.get(quality_type, "best")
         quality_name = {
-            "hd": "HD Quality",
-            "sd": "SD Quality", 
-            "audio": "Audio Only",
-            "best": "Best Available"
+            "4k": "4K Ultra HD",
+            "1440p": "1440p QHD", 
+            "1080p": "1080p Full HD",
+            "720p": "720p HD",
+            "480p": "480p Standard",
+            "360p": "360p Compact",
+            "audio": "MP3 Audio Only"
         }.get(quality_type, "Best Available")
 
-        # Send processing message
-        processing_text = f"🔄 **Processing Download...**\n\n"
-        processing_text += f"🎬 **Quality:** {quality_name}\n"
-        processing_text += f"🔗 **URL:** {video_url[:50]}{'...' if len(video_url) > 50 else ''}\n\n"
-        processing_text += f"⚡ **Smart Download Priority:**\n"
-        processing_text += f"1️⃣ **Packages** (yt-dlp, instaloader)\n"
-        processing_text += f"2️⃣ **APIs** (Platform-specific)\n"
-        processing_text += f"3️⃣ **Cookies** (Authentication)\n\n"
-        processing_text += f"📊 **Status:** Initializing...\n\n"
-        processing_text += f"👨‍💻 **Developer:** {Config.DEVELOPER_CREDIT}"
+        # Get video info first to show title and description
+        async with SocialMediaDownloader() as temp_downloader:
+            video_info = await temp_downloader._get_video_quality_info(video_url, await temp_downloader.get_platform(video_url))
 
-        await query.edit_message_text(
-            processing_text,
-            parse_mode=ParseMode.MARKDOWN
-        )
+        # Send enhanced processing message with title and description
+        processing_text = f"🔄 Processing Download...\n\n"
+
+        # Show video title and description if available
+        if video_info:
+            title = video_info.get('title', 'Unknown Title')[:60]
+            description = video_info.get('description', '')[:100]
+            uploader = video_info.get('uploader', video_info.get('channel', ''))[:30]
+
+            processing_text += f"🎬 Title: {title}\n"
+            if description:
+                processing_text += f"📝 Description: {description}...\n"
+            if uploader:
+                processing_text += f"👤 By: {uploader}\n"
+            processing_text += f"\n"
+
+        processing_text += f"🎯 Quality: {quality_name}\n"
+        processing_text += f"🔗 URL: {video_url[:50]}{'...' if len(video_url) > 50 else ''}\n\n"
+        processing_text += f"⚡ Smart Download Priority:\n"
+        processing_text += f"1. Packages (yt-dlp, instaloader)\n"
+        processing_text += f"2. APIs (Platform-specific)\n"
+        processing_text += f"3. Cookies (Authentication)\n\n"
+        processing_text += f"📊 Status: Starting download...\n\n"
+        processing_text += f"Developer: {Config.DEVELOPER_CREDIT}"
+
+        await query.edit_message_text(processing_text)
 
         # Create progress tracker
         progress_tracker = ProgressTracker(
@@ -1973,15 +2367,14 @@ class TelegramBot:
                     await context.bot.edit_message_text(
                         chat_id=chat_id,
                         message_id=query.message.message_id,
-                        text="❌ **Enhanced Download Failed**\n\n"
+                        text="❌ Enhanced Download Failed\n\n"
                              "This could be due to:\n"
                              "• Private/restricted content\n"
                              "• Unsupported video format\n"
                              "• Network connectivity issues\n"
                              "• File size exceeds 2GB limit\n"
                              "• Platform rate limiting\n\n"
-                             "Please try with a different video URL.",
-                        parse_mode=ParseMode.MARKDOWN
+                             "Please try with a different video URL."
                     )
                     return
 
@@ -1998,7 +2391,7 @@ class TelegramBot:
                          f"🚀 **Platform:** {metadata.get('platform', 'Unknown').title()}\n"
                          f"⚡ **Status:** Optimized and ready\n"
                          f"📡 **Uploading to Telegram...**",
-                    parse_mode=ParseMode.MARKDOWN
+
                 )
 
                 # Enhanced caption with safe formatting
@@ -2028,9 +2421,7 @@ class TelegramBot:
 
                 caption += f"⚡ **Enhanced Download by {Config.DEVELOPER_CREDIT}**\n\n🔗 **Source:** {video_url}"
 
-                # Send video with enhanced upload tracking
-                start_upload = time.time()
-
+                # Send video with simplified upload 
                 with open(file_path, 'rb') as video_file:
                     # Get safe duration value
                     duration_value = None
@@ -2040,36 +2431,56 @@ class TelegramBot:
                         except (ValueError, TypeError, OverflowError):
                             duration_value = None
 
-                    # Enhanced upload with progress tracking
-                    class UploadProgressCallback:
-                        def __init__(self, progress_tracker, total_size):
-                            self.progress_tracker = progress_tracker
-                            self.total_size = total_size
-                            self.uploaded = 0
-                            self.last_update = 0
-
-                        async def __call__(self, current, total):
-                            self.uploaded = current
-                            if time.time() - self.last_update > 2:  # Update every 2 seconds
-                                upload_speed = current / (time.time() - start_upload) if time.time() > start_upload else 0
-                                speed_str = f"{upload_speed/1024/1024:.1f} MB/s" if upload_speed > 0 else ""
-                                await self.progress_tracker.update_progress(current, total, speed_str, "Uploading")
-                                self.last_update = time.time()
-
-                    await context.bot.send_video(
-                        chat_id=chat_id,
-                        video=video_file,
-                        caption=caption,
-                        parse_mode=ParseMode.MARKDOWN,
-                        supports_streaming=True,
-                        duration=duration_value,
-                        width=None,
-                        height=None,
-                        read_timeout=600,
-                        write_timeout=600,
-                        connect_timeout=60,
-                        pool_timeout=60
-                    )
+                    # Send as audio or video based on format type
+                    if format_type == "mp3" or quality_type == "audio" or file_path.endswith(('.mp3', '.m4a', '.aac')):
+                        # Enhanced audio caption with metadata
+                        audio_caption = f"🎵 **{metadata.get('title', 'Audio Download')}**\n\n"
+                        
+                        if metadata.get('description'):
+                            desc = metadata['description'][:200] + "..." if len(metadata['description']) > 200 else metadata['description']
+                            audio_caption += f"📝 **Description:** {desc}\n\n"
+                        
+                        if metadata.get('uploader'):
+                            audio_caption += f"👤 **Artist:** {metadata['uploader']}\n"
+                        
+                        if metadata.get('platform'):
+                            audio_caption += f"🌐 **Platform:** {metadata['platform'].title()}\n"
+                        
+                        # Safe duration formatting for audio
+                        if metadata.get('duration'):
+                            try:
+                                duration = metadata['duration']
+                                if isinstance(duration, (int, float)) and duration > 0:
+                                    duration_int = int(float(duration))
+                                    minutes = duration_int // 60
+                                    seconds = duration_int % 60
+                                    duration_str = f"{minutes}:{seconds:02d}"
+                                    audio_caption += f"⏱️ **Duration:** {duration_str}\n"
+                            except (ValueError, TypeError, OverflowError):
+                                pass
+                        
+                        audio_caption += f"\n⚡ **Enhanced Download by {Config.DEVELOPER_CREDIT}**\n🔗 **Source:** {video_url}"
+                        
+                        await context.bot.send_audio(
+                            chat_id=chat_id,
+                            audio=video_file,
+                            caption=audio_caption,
+                            duration=duration_value,
+                            performer=metadata.get('uploader', 'Unknown Artist'),
+                            title=metadata.get('title', 'Audio Download'),
+                            read_timeout=300,
+                            write_timeout=300
+                        )
+                    else:
+                        await context.bot.send_video(
+                            chat_id=chat_id,
+                            video=video_file,
+                            caption=caption,
+                            supports_streaming=True,
+                            duration=duration_value,
+                            read_timeout=300,
+                            write_timeout=300
+                        )
 
                 # Clear pending URL from user state
                 if "pending_url" in user_states[chat_id]:
@@ -2100,9 +2511,9 @@ class TelegramBot:
                      "An error occurred during processing.\n"
                      "Please try again later.\n\n"
                      f"👨‍💻 **Developer:** {Config.DEVELOPER_CREDIT}",
-                parse_mode=ParseMode.MARKDOWN
+
             )
-            
+
             # Clear pending URL from user state
             if chat_id in user_states and "pending_url" in user_states[chat_id]:
                 del user_states[chat_id]["pending_url"]
@@ -2120,7 +2531,7 @@ class TelegramBot:
             await self.bot.send_message(
                 chat_id=Config.TELEGRAM_CHAT_ID,
                 text=notification_text,
-                parse_mode=ParseMode.MARKDOWN
+
             )
         except Exception as e:
             logger.error(f"Failed to notify admin: {e}")
@@ -2146,7 +2557,6 @@ class TelegramBot:
                     chat_id=Config.TELEGRAM_CHANNEL_ID,
                     video=video_file,
                     caption=caption,
-                    parse_mode=ParseMode.MARKDOWN,
                     supports_streaming=True,
                     read_timeout=600,
                     write_timeout=600
@@ -2172,7 +2582,7 @@ class TelegramBot:
             await self.bot.send_message(
                 chat_id=Config.TELEGRAM_CHANNEL_ID,
                 text=log_text,
-                parse_mode=ParseMode.MARKDOWN
+
             )
         except Exception as e:
             logger.error(f"Failed to log to private channel: {e}")
@@ -2196,7 +2606,7 @@ class TelegramBot:
 
         await update.message.reply_text(
             stats_text,
-            parse_mode=ParseMode.MARKDOWN
+
         )
 
     async def help_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -2229,7 +2639,7 @@ class TelegramBot:
 
         await update.message.reply_text(
             help_text,
-            parse_mode=ParseMode.MARKDOWN
+
         )
 
     async def cleanup_task(self):
@@ -2330,7 +2740,6 @@ def webhook():
         update_dict = request.get_json()
         if update_dict:
             # Process the update asynchronously
-            from telegram import Update
             update = Update.de_json(update_dict, bot_instance.bot)
             if update:
                 # Process update in background thread
