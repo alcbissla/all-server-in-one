@@ -32,11 +32,30 @@ import validators
 import tldextract
 import rfc3987
 
-# Telegram bot with standard imports
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Bot, Update
-from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, ContextTypes, filters
-from telegram.constants import ParseMode
-from telegram.error import TelegramError
+# Telegram bot with standard imports - temporarily disabled for web interface testing
+# from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Bot, Update
+# from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, ContextTypes, filters
+# from telegram.constants import ParseMode
+# from telegram.error import TelegramError
+
+# Mock classes for web-only mode
+class MockTelegram:
+    def __init__(self, *args, **kwargs): pass
+    def __call__(self, *args, **kwargs): return self
+    def __getattr__(self, name): return MockTelegram()
+
+InlineKeyboardButton = MockTelegram
+InlineKeyboardMarkup = MockTelegram
+Bot = MockTelegram
+Update = MockTelegram
+Application = MockTelegram
+CommandHandler = MockTelegram
+MessageHandler = MockTelegram
+CallbackQueryHandler = MockTelegram
+ContextTypes = MockTelegram()
+filters = MockTelegram()
+ParseMode = MockTelegram()
+TelegramError = Exception
 
 # Video downloaders and processors
 import yt_dlp
@@ -58,9 +77,10 @@ import m3u8
 from dotenv import load_dotenv
 
 # Flask web server
-from flask import Flask, jsonify, render_template_string, request
+from flask import Flask, jsonify, render_template_string, request, session, redirect, url_for
 from werkzeug.middleware.proxy_fix import ProxyFix
 import threading
+import uuid
 
 # Load environment variables
 load_dotenv()
@@ -167,145 +187,508 @@ app = Flask(__name__)
 app.secret_key = os.environ.get("SESSION_SECRET", "dev-secret-key-change-in-production")
 app.wsgi_app = ProxyFix(app.wsgi_app, x_proto=1, x_host=1)
 
-# HTML template for status page
-STATUS_PAGE_TEMPLATE = """
+# Global variable to store download progress
+download_progress = {}
+
+# Video analysis cache for previews and quality detection
+video_analysis_cache = {}
+
+# HTML template for the downloader web interface
+DOWNLOADER_PAGE_TEMPLATE = """
 <!DOCTYPE html>
-<html lang="en" data-bs-theme="dark">
+<html lang="en" data-bs-theme="light">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Social Media Downloader Bot</title>
-    <link href="https://cdn.replit.com/agent/bootstrap-agent-dark-theme.min.css" rel="stylesheet">
+    <title>Social Media Downloader</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
     <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet">
+    <style>
+        body { background-color: #f8f9fa; }
+        .download-card { 
+            max-width: 600px; 
+            margin: 50px auto; 
+            box-shadow: 0 4px 6px rgba(0,0,0,0.1);
+            border-radius: 15px;
+        }
+        .quality-option, .format-option {
+            border: 2px solid #e9ecef;
+            border-radius: 8px;
+            padding: 15px;
+            margin-bottom: 10px;
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+        .quality-option:hover, .format-option:hover {
+            border-color: #007bff;
+            background-color: #f8f9fa;
+        }
+        .quality-option.selected, .format-option.selected {
+            border-color: #007bff;
+            background-color: #e3f2fd;
+        }
+        .quality-option input[type="radio"], .format-option input[type="radio"] {
+            margin-right: 10px;
+        }
+        .download-btn {
+            background: linear-gradient(45deg, #007bff, #0056b3);
+            border: none;
+            border-radius: 25px;
+            padding: 12px 30px;
+            font-weight: bold;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+        }
+        .progress-container {
+            display: none;
+            margin-top: 20px;
+        }
+        .developer-section {
+            background-color: #f8f9fa;
+            padding: 30px 0;
+            margin-top: 50px;
+            border-top: 1px solid #dee2e6;
+        }
+        .social-icon {
+            width: 50px;
+            height: 50px;
+            border-radius: 50%;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            margin: 0 10px;
+            color: white;
+            text-decoration: none;
+            transition: transform 0.2s;
+        }
+        .social-icon:hover {
+            transform: scale(1.1);
+            color: white;
+        }
+        .telegram { background-color: #0088cc; }
+        .facebook { background-color: #1877f2; }
+        .instagram { background: linear-gradient(45deg, #f58529, #dd2a7b, #8134af); }
+        .tiktok { background-color: #000000; }
+    </style>
 </head>
 <body>
-    <div class="container mt-5">
-        <div class="row justify-content-center">
-            <div class="col-md-10">
-                <div class="card">
-                    <div class="card-header text-center">
-                        <h1 class="card-title mb-0">
-                            <i class="fab fa-telegram-plane text-info me-2"></i>
-                            Social Media Downloader Bot
-                        </h1>
+    <div class="container">
+        <div class="download-card card">
+            <div class="card-body p-4">
+                <form id="downloadForm">
+                    <div class="mb-4">
+                        <label for="url" class="form-label h6">Paste your link here</label>
+                        <div class="input-group">
+                            <input type="url" class="form-control form-control-lg" id="url" name="url" 
+                                   placeholder="https://youtube.com/watch?v=... or https://instagram.com/p/..." required>
+                            <button type="button" class="btn btn-outline-secondary" onclick="pasteFromClipboard()">
+                                <i class="fas fa-paste"></i>
+                            </button>
+                            <button type="button" class="btn btn-primary" onclick="analyzeVideo()">
+                                <i class="fas fa-search"></i> Analyze
+                            </button>
+                        </div>
+                        <div class="form-text">Supported: YouTube, Instagram, Twitter, TikTok, Facebook, M3U8</div>
                     </div>
-                    <div class="card-body">
-                        <div class="row">
-                            <div class="col-md-6">
-                                <div class="card bg-dark border-secondary">
-                                    <div class="card-body text-center">
-                                        <h5 class="card-title">
-                                            <i class="fas fa-robot me-2"></i>
-                                            Bot Status
-                                        </h5>
-                                        {% if status.running %}
-                                            <span class="badge bg-success fs-6">
-                                                <i class="fas fa-check-circle me-1"></i>
-                                                Running
-                                            </span>
-                                        {% else %}
-                                            <span class="badge bg-danger fs-6">
-                                                <i class="fas fa-times-circle me-1"></i>
-                                                Stopped
-                                            </span>
-                                        {% endif %}
-                                    </div>
-                                </div>
-                            </div>
-                            <div class="col-md-6">
-                                <div class="card bg-dark border-secondary">
-                                    <div class="card-body text-center">
-                                        <h5 class="card-title">
-                                            <i class="fas fa-server me-2"></i>
-                                            Server Status
-                                        </h5>
-                                        <span class="badge bg-success fs-6">
-                                            <i class="fas fa-check-circle me-1"></i>
-                                            Online
-                                        </span>
-                                    </div>
-                                </div>
-                            </div>
-                        </div>
 
-                        <div class="mt-4">
-                            <h5><i class="fas fa-download me-2"></i>Download Statistics</h5>
-                            <div class="table-responsive">
-                                <table class="table table-dark table-striped">
-                                    <tbody>
-                                        <tr>
-                                            <td><strong>Total Users</strong></td>
-                                            <td>{{ stats.total_users }}</td>
-                                        </tr>
-                                        <tr>
-                                            <td><strong>Total Downloads</strong></td>
-                                            <td>{{ stats.total_downloads }}</td>
-                                        </tr>
-                                        <tr>
-                                            <td><strong>Supported Platforms</strong></td>
-                                            <td>YouTube, TikTok, Instagram, Facebook, Twitter</td>
-                                        </tr>
-                                        <tr>
-                                            <td><strong>Last Update</strong></td>
-                                            <td>
-                                                {% if status.last_update %}
-                                                    {{ status.last_update }}
-                                                {% else %}
-                                                    Never
-                                                {% endif %}
-                                            </td>
-                                        </tr>
-                                    </tbody>
-                                </table>
-                            </div>
-                        </div>
-
-                        <div class="mt-4">
-                            <h5><i class="fas fa-link me-2"></i>API Endpoints</h5>
-                            <div class="list-group">
-                                <div class="list-group-item list-group-item-action bg-dark border-secondary">
-                                    <div class="d-flex w-100 justify-content-between">
-                                        <h6 class="mb-1">/health</h6>
-                                        <small class="text-info">GET</small>
+                    <!-- Video Preview Section -->
+                    <div id="videoPreview" class="mb-4" style="display: none;">
+                        <div class="card bg-light">
+                            <div class="card-body">
+                                <div class="row">
+                                    <div class="col-md-4">
+                                        <img id="videoThumbnail" src="" alt="Video Thumbnail" 
+                                             class="img-fluid rounded" style="width: 100%; height: auto;">
                                     </div>
-                                    <p class="mb-1">Health check endpoint for monitoring</p>
-                                </div>
-                                <div class="list-group-item list-group-item-action bg-dark border-secondary">
-                                    <div class="d-flex w-100 justify-content-between">
-                                        <h6 class="mb-1">/status</h6>
-                                        <small class="text-info">GET</small>
+                                    <div class="col-md-8">
+                                        <h5 id="videoTitle" class="card-title mb-2"></h5>
+                                        <p id="videoDescription" class="card-text text-muted small mb-2"></p>
+                                        <div class="d-flex justify-content-between text-muted small mb-2">
+                                            <span><i class="fas fa-user"></i> <span id="videoUploader"></span></span>
+                                            <span><i class="fas fa-clock"></i> <span id="videoDuration"></span></span>
+                                        </div>
+                                        <div class="mb-2">
+                                            <span class="badge bg-primary me-2" id="videoPlatform"></span>
+                                            <span class="badge bg-secondary" id="videoViews"></span>
+                                        </div>
                                     </div>
-                                    <p class="mb-1">Bot status and statistics</p>
-                                </div>
-                                <div class="list-group-item list-group-item-action bg-dark border-secondary">
-                                    <div class="d-flex w-100 justify-content-between">
-                                        <h6 class="mb-1">/wake</h6>
-                                        <small class="text-info">GET</small>
-                                    </div>
-                                    <p class="mb-1">Wake up endpoint to keep service alive</p>
                                 </div>
                             </div>
                         </div>
                     </div>
-                    <div class="card-footer text-center text-muted">
-                        <small>
-                            <i class="fas fa-cloud me-1"></i>
-                            Deployed on Render
-                        </small>
+
+                    <div class="row">
+                        <div class="col-md-6">
+                            <h6>Video Quality <span id="qualityStatus" class="text-muted small">(Click Analyze to detect)</span></h6>
+                            <div id="qualityOptions">
+                                <!-- Default quality options - will be replaced after analysis -->
+                                <div class="quality-option" onclick="selectQuality('1080p')">
+                                    <input type="radio" name="quality" value="1080p" id="quality_1080p" checked>
+                                    <label for="quality_1080p" class="mb-0">
+                                        <strong>1080p HD</strong><br>
+                                        <small class="text-muted">Full HD quality</small>
+                                    </label>
+                                </div>
+                                <div class="quality-option" onclick="selectQuality('720p')">
+                                    <input type="radio" name="quality" value="720p" id="quality_720p">
+                                    <label for="quality_720p" class="mb-0">
+                                        <strong>720p HD</strong><br>
+                                        <small class="text-muted">HD quality</small>
+                                    </label>
+                                </div>
+                                <div class="quality-option" onclick="selectQuality('480p')">
+                                    <input type="radio" name="quality" value="480p" id="quality_480p">
+                                    <label for="quality_480p" class="mb-0">
+                                        <strong>480p</strong><br>
+                                        <small class="text-muted">Standard quality</small>
+                                    </label>
+                                </div>
+                            </div>
+                        </div>
+                        
+                        <div class="col-md-6">
+                            <h6>Download Format</h6>
+                            <div class="format-option" onclick="selectFormat('mp4')">
+                                <input type="radio" name="format" value="mp4" id="format_mp4" checked>
+                                <label for="format_mp4" class="mb-0">
+                                    <strong>MP4 Video</strong><br>
+                                    <small class="text-muted">Most compatible</small>
+                                </label>
+                            </div>
+                            <div class="format-option" onclick="selectFormat('mp3')">
+                                <input type="radio" name="format" value="mp3" id="format_mp3">
+                                <label for="format_mp3" class="mb-0">
+                                    <strong>MP3 Audio</strong><br>
+                                    <small class="text-muted">Audio only</small>
+                                </label>
+                            </div>
+                            <div class="format-option" onclick="selectFormat('webm')">
+                                <input type="radio" name="format" value="webm" id="format_webm">
+                                <label for="format_webm" class="mb-0">
+                                    <strong>WebM</strong><br>
+                                    <small class="text-muted">Smaller file size</small>
+                                </label>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="d-grid mt-4">
+                        <button type="submit" class="btn btn-primary btn-lg download-btn">
+                            <i class="fas fa-download me-2"></i>Start Download
+                        </button>
+                    </div>
+                </form>
+
+                <div class="progress-container" id="progressContainer">
+                    <div class="d-flex justify-content-between align-items-center mb-2">
+                        <small class="text-muted">Downloading...</small>
+                        <small class="text-muted" id="progressText">0%</small>
+                    </div>
+                    <div class="progress" style="height: 20px;">
+                        <div class="progress-bar progress-bar-striped progress-bar-animated" 
+                             role="progressbar" style="width: 0%" id="progressBar"></div>
+                    </div>
+                    <div class="mt-2">
+                        <small class="text-muted" id="statusText">Preparing download...</small>
+                    </div>
+                </div>
+
+                <div id="resultContainer" style="display: none;" class="mt-4">
+                    <div class="alert alert-success">
+                        <h6 class="alert-heading">Download Complete!</h6>
+                        <p class="mb-0" id="resultText">Your file has been processed and sent to the private channel.</p>
                     </div>
                 </div>
             </div>
         </div>
     </div>
+
+    <!-- Developer Section -->
+    <div class="developer-section">
+        <div class="container text-center">
+            <h5 class="mb-3">Developer Contact</h5>
+            <p class="text-muted mb-4">Connect with me on social media for updates and support</p>
+            <div>
+                <a href="https://t.me/alcboss112" class="social-icon telegram" target="_blank">
+                    <i class="fab fa-telegram-plane"></i>
+                </a>
+                <a href="#" class="social-icon facebook" target="_blank">
+                    <i class="fab fa-facebook-f"></i>
+                </a>
+                <a href="#" class="social-icon instagram" target="_blank">
+                    <i class="fab fa-instagram"></i>
+                </a>
+                <a href="#" class="social-icon tiktok" target="_blank">
+                    <i class="fab fa-tiktok"></i>
+                </a>
+            </div>
+            <p class="mt-3 text-muted small">
+                <i class="fas fa-code me-1"></i>
+                Developed by @Alcboss112
+            </p>
+        </div>
+    </div>
+
     <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
+    <script>
+        function selectQuality(quality) {
+            document.querySelectorAll('.quality-option').forEach(el => el.classList.remove('selected'));
+            event.currentTarget.classList.add('selected');
+            document.getElementById('quality_' + quality).checked = true;
+        }
+
+        function selectFormat(format) {
+            document.querySelectorAll('.format-option').forEach(el => el.classList.remove('selected'));
+            event.currentTarget.classList.add('selected');
+            document.getElementById('format_' + format).checked = true;
+        }
+
+        async function pasteFromClipboard() {
+            try {
+                const text = await navigator.clipboard.readText();
+                document.getElementById('url').value = text;
+            } catch (err) {
+                console.log('Clipboard access denied');
+            }
+        }
+
+        async function analyzeVideo() {
+            const url = document.getElementById('url').value;
+            if (!url) {
+                alert('Please enter a video URL first');
+                return;
+            }
+
+            // Show analyzing status
+            document.getElementById('qualityStatus').innerHTML = '<i class="fas fa-spinner fa-spin"></i> Analyzing video...';
+            document.getElementById('videoPreview').style.display = 'none';
+
+            try {
+                const response = await fetch('/analyze', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify({ url: url })
+                });
+
+                const data = await response.json();
+                if (data.success) {
+                    pollVideoInfo(url);
+                } else {
+                    showAnalysisError(data.error || 'Analysis failed');
+                }
+            } catch (error) {
+                showAnalysisError('Network error: ' + error.message);
+            }
+        }
+
+        function pollVideoInfo(url) {
+            const encodedUrl = encodeURIComponent(url);
+            const interval = setInterval(async () => {
+                try {
+                    const response = await fetch('/video_info/' + encodedUrl);
+                    const data = await response.json();
+                    
+                    if (data.analyzing) {
+                        return; // Continue polling
+                    }
+                    
+                    clearInterval(interval);
+                    
+                    if (data.success) {
+                        showVideoInfo(data);
+                        updateQualityOptions(data.available_qualities);
+                    } else {
+                        showAnalysisError(data.error || 'Analysis failed');
+                    }
+                } catch (error) {
+                    console.error('Video info polling error:', error);
+                }
+            }, 2000);
+        }
+
+        function showVideoInfo(videoData) {
+            // Show video preview
+            document.getElementById('videoPreview').style.display = 'block';
+            document.getElementById('videoThumbnail').src = videoData.thumbnail || 'data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iMjAwIiBoZWlnaHQ9IjEyMCIgeG1sbnM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvc3ZnIj48cmVjdCB3aWR0aD0iMjAwIiBoZWlnaHQ9IjEyMCIgZmlsbD0iI2Y4ZjlmYSIvPjx0ZXh0IHg9IjUwJSIgeT0iNTAlIiBmb250LWZhbWlseT0iQXJpYWwiIGZvbnQtc2l6ZT0iMTQiIGZpbGw9IiM2Yzc1N2QiIHRleHQtYW5jaG9yPSJtaWRkbGUiIGR5PSIuM2VtIj5ObyBUaHVtYm5haWw8L3RleHQ+PC9zdmc+';
+            document.getElementById('videoTitle').textContent = videoData.title;
+            document.getElementById('videoDescription').textContent = videoData.description;
+            document.getElementById('videoUploader').textContent = videoData.uploader;
+            document.getElementById('videoDuration').textContent = formatDuration(videoData.duration);
+            document.getElementById('videoPlatform').textContent = videoData.platform;
+            document.getElementById('videoViews').textContent = formatViews(videoData.view_count);
+            
+            document.getElementById('qualityStatus').innerHTML = '<i class="fas fa-check text-success"></i> Available qualities detected';
+        }
+
+        function updateQualityOptions(qualities) {
+            const qualityContainer = document.getElementById('qualityOptions');
+            if (!qualities || qualities.length === 0) {
+                return;
+            }
+
+            // Create new quality options with detected qualities
+            let qualityHTML = '';
+            const qualityEmojis = {
+                '4K': '🌟',
+                '1440p': '🔥',
+                '1080p': '⭐',
+                '720p': '✨',
+                '480p': '✅',
+                '360p': '💾'
+            };
+
+            qualities.forEach((q, index) => {
+                const emoji = qualityEmojis[q.quality] || '📹';
+                const checked = index === 0 ? 'checked' : '';
+                const selected = index === 0 ? 'selected' : '';
+                
+                qualityHTML += `
+                    <div class="quality-option ${selected}" onclick="selectQuality('${q.quality.toLowerCase()}')">
+                        <input type="radio" name="quality" value="${q.quality.toLowerCase()}" id="quality_${q.quality.toLowerCase()}" ${checked}>
+                        <label for="quality_${q.quality.toLowerCase()}" class="mb-0">
+                            <strong>${emoji} ${q.quality}</strong><br>
+                            <small class="text-muted">${q.height}p • ${q.size_text}</small>
+                        </label>
+                    </div>
+                `;
+            });
+
+            qualityContainer.innerHTML = qualityHTML;
+        }
+
+        function formatDuration(seconds) {
+            if (!seconds) return 'Unknown';
+            const minutes = Math.floor(seconds / 60);
+            const remainingSeconds = seconds % 60;
+            return `${minutes}:${remainingSeconds.toString().padStart(2, '0')}`;
+        }
+
+        function formatViews(views) {
+            if (!views) return '';
+            if (views >= 1000000) {
+                return `${(views / 1000000).toFixed(1)}M views`;
+            } else if (views >= 1000) {
+                return `${(views / 1000).toFixed(1)}K views`;
+            }
+            return `${views} views`;
+        }
+
+        function showAnalysisError(error) {
+            document.getElementById('qualityStatus').innerHTML = '<i class="fas fa-exclamation-triangle text-warning"></i> ' + error;
+        }
+
+        document.getElementById('downloadForm').addEventListener('submit', async function(e) {
+            e.preventDefault();
+            
+            const url = document.getElementById('url').value;
+            const quality = document.querySelector('input[name="quality"]:checked').value;
+            const format = document.querySelector('input[name="format"]:checked').value;
+            
+            if (!url) {
+                alert('Please enter a valid URL');
+                return;
+            }
+
+            // Show progress
+            document.getElementById('progressContainer').style.display = 'block';
+            document.getElementById('resultContainer').style.display = 'none';
+            document.querySelector('.download-btn').disabled = true;
+            document.querySelector('.download-btn').innerHTML = '<i class="fas fa-spinner fa-spin me-2"></i>Processing...';
+
+            try {
+                const response = await fetch('/download', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify({
+                        url: url,
+                        quality: quality,
+                        format: format
+                    })
+                });
+
+                const data = await response.json();
+                
+                if (data.success) {
+                    // Poll for progress
+                    pollProgress(data.download_id);
+                } else {
+                    showError(data.error || 'Download failed');
+                }
+            } catch (error) {
+                showError('Network error: ' + error.message);
+            }
+        });
+
+        function pollProgress(downloadId) {
+            const interval = setInterval(async () => {
+                try {
+                    const response = await fetch('/progress/' + downloadId);
+                    const data = await response.json();
+                    
+                    updateProgress(data.progress, data.status, data.size_info);
+                    
+                    if (data.completed) {
+                        clearInterval(interval);
+                        showResult(data.result);
+                    } else if (data.error) {
+                        clearInterval(interval);
+                        showError(data.error);
+                    }
+                } catch (error) {
+                    console.error('Progress polling error:', error);
+                }
+            }, 1000);
+        }
+
+        function updateProgress(progress, status, sizeInfo) {
+            document.getElementById('progressBar').style.width = progress + '%';
+            document.getElementById('progressText').textContent = progress + '%';
+            document.getElementById('statusText').textContent = status + (sizeInfo ? ' (' + sizeInfo + ')' : '');
+        }
+
+        function showResult(result) {
+            document.getElementById('progressContainer').style.display = 'none';
+            document.getElementById('resultContainer').style.display = 'block';
+            document.getElementById('resultText').textContent = result.message;
+            resetForm();
+        }
+
+        function showError(error) {
+            document.getElementById('progressContainer').style.display = 'none';
+            document.getElementById('resultContainer').style.display = 'block';
+            document.getElementById('resultContainer').className = 'mt-4';
+            document.getElementById('resultContainer').innerHTML = `
+                <div class="alert alert-danger">
+                    <h6 class="alert-heading">Download Failed</h6>
+                    <p class="mb-0">${error}</p>
+                </div>
+            `;
+            resetForm();
+        }
+
+        function resetForm() {
+            document.querySelector('.download-btn').disabled = false;
+            document.querySelector('.download-btn').innerHTML = '<i class="fas fa-download me-2"></i>Start Download';
+        }
+
+        // Initialize selected options
+        document.addEventListener('DOMContentLoaded', function() {
+            document.querySelector('.quality-option').classList.add('selected');
+            document.querySelector('.format-option').classList.add('selected');
+        });
+    </script>
 </body>
 </html>
 """
 
 @app.route('/')
 def index():
-    """Main page showing bot status and statistics"""
-    return render_template_string(STATUS_PAGE_TEMPLATE, status=bot_status, stats=download_stats)
+    """Main downloader web interface"""
+    return render_template_string(DOWNLOADER_PAGE_TEMPLATE)
 
 @app.route('/health')
 def health_check():
@@ -345,6 +728,99 @@ def wake():
             "error": str(e),
             "timestamp": time.time()
         }), 500
+
+@app.route('/download', methods=['POST'])
+def web_download():
+    """Handle download requests from web interface"""
+    try:
+        data = request.get_json()
+        url = data.get('url')
+        quality = data.get('quality', '720p')
+        format_type = data.get('format', 'mp4')
+        
+        if not url:
+            return jsonify({'success': False, 'error': 'URL is required'}), 400
+            
+        # Generate download ID
+        download_id = str(uuid.uuid4())
+        
+        # Initialize progress tracking
+        download_progress[download_id] = {
+            'progress': 0,
+            'status': 'Starting download...',
+            'completed': False,
+            'error': None,
+            'result': None,
+            'size_info': '',
+            'title': '',
+            'description': ''
+        }
+        
+        # Start download in background
+        asyncio.create_task(process_web_download(download_id, url, quality, format_type))
+        
+        return jsonify({
+            'success': True,
+            'download_id': download_id,
+            'message': 'Download started'
+        })
+        
+    except Exception as e:
+        logger.error(f"Web download error: {e}")
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+@app.route('/progress/<download_id>')
+def get_progress(download_id):
+    """Get download progress"""
+    try:
+        if download_id not in download_progress:
+            return jsonify({'error': 'Download not found'}), 404
+            
+        progress_data = download_progress[download_id]
+        return jsonify(progress_data)
+        
+    except Exception as e:
+        logger.error(f"Progress check error: {e}")
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/analyze', methods=['POST'])
+def analyze_video():
+    """Analyze video URL to get preview and quality options"""
+    try:
+        data = request.get_json()
+        url = data.get('url')
+        
+        if not url:
+            return jsonify({'success': False, 'error': 'URL is required'}), 400
+        
+        # Start analysis in background
+        asyncio.create_task(analyze_video_info(url))
+        
+        return jsonify({
+            'success': True,
+            'message': 'Analysis started'
+        })
+        
+    except Exception as e:
+        logger.error(f"Video analysis error: {e}")
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+@app.route('/video_info/<path:encoded_url>')
+def get_video_info(encoded_url):
+    """Get analyzed video information"""
+    try:
+        import urllib.parse
+        url = urllib.parse.unquote(encoded_url)
+        
+        # Check if analysis is complete
+        if url in video_analysis_cache:
+            return jsonify(video_analysis_cache[url])
+        else:
+            return jsonify({'analyzing': True, 'message': 'Analysis in progress...'})
+            
+    except Exception as e:
+        logger.error(f"Video info error: {e}")
+        return jsonify({'error': str(e)}), 500
 
 def run_flask_server():
     """Run Flask server in a separate thread"""
@@ -465,6 +941,194 @@ class ProgressTracker:
             bytes_num /= 1024.0
         return f"{bytes_num:.1f} TB"
 
+async def analyze_video_info(url: str):
+    """Analyze video URL to extract preview and quality information"""
+    try:
+        import urllib.parse
+        
+        async with SocialMediaDownloader() as downloader:
+            platform = await downloader.get_platform(url)
+            
+            # Get comprehensive video information
+            video_info = await downloader._get_video_quality_info(url, platform)
+            
+            if video_info:
+                # Extract available qualities with file sizes
+                available_qualities = []
+                if 'video_formats' in video_info:
+                    for fmt in video_info['video_formats']:
+                        quality = fmt.get('quality_level')
+                        filesize_mb = fmt.get('filesize_mb', 0)
+                        height = fmt.get('height', 0)
+                        if quality:
+                            available_qualities.append({
+                                'quality': quality,
+                                'height': height,
+                                'size_mb': filesize_mb,
+                                'size_text': f"{filesize_mb:.0f}MB" if filesize_mb > 0 else "Auto"
+                            })
+                
+                # Get thumbnail URL
+                thumbnail_url = video_info.get('thumbnail', '')
+                
+                # Store analysis result
+                video_analysis_cache[url] = {
+                    'success': True,
+                    'title': video_info.get('title', 'Unknown Video'),
+                    'description': video_info.get('description', '')[:200] + '...' if video_info.get('description', '') else '',
+                    'uploader': video_info.get('uploader', video_info.get('channel', 'Unknown')),
+                    'duration': video_info.get('duration', 0),
+                    'view_count': video_info.get('view_count', 0),
+                    'thumbnail': thumbnail_url,
+                    'platform': platform.title(),
+                    'available_qualities': available_qualities,
+                    'has_audio': bool(video_info.get('audio_formats')),
+                    'upload_date': video_info.get('upload_date', ''),
+                }
+            else:
+                video_analysis_cache[url] = {
+                    'success': False,
+                    'error': 'Could not analyze video'
+                }
+                
+    except Exception as e:
+        logger.error(f"Video analysis failed: {e}")
+        video_analysis_cache[url] = {
+            'success': False,
+            'error': str(e)
+        }
+
+async def process_web_download(download_id: str, url: str, quality: str, format_type: str):
+    """Process download for web interface with enhanced progress tracking"""
+    try:
+        # Update status
+        download_progress[download_id]['status'] = 'Analyzing URL...'
+        download_progress[download_id]['progress'] = 5
+        
+        async with SocialMediaDownloader() as downloader:
+            platform = await downloader.get_platform(url)
+            
+            # Get video info first
+            download_progress[download_id]['status'] = 'Getting video information...'
+            download_progress[download_id]['progress'] = 15
+            
+            # Extract title and description
+            try:
+                video_info = await downloader._get_video_quality_info(url, platform)
+                if video_info and isinstance(video_info, dict):
+                    download_progress[download_id]['title'] = video_info.get('title', 'Unknown Title')
+                    download_progress[download_id]['description'] = video_info.get('description', '')[:200] + '...' if video_info.get('description', '') else ''
+            except:
+                download_progress[download_id]['title'] = 'Video Download'
+                download_progress[download_id]['description'] = ''
+            
+            # Create web progress tracker
+            class WebProgressTracker:
+                def __init__(self, download_id):
+                    self.download_id = download_id
+                    self.last_update = 0
+                
+                async def update_progress(self, current: int, total: int, speed: str = "", stage: str = "Downloading"):
+                    now = time.time()
+                    if now - self.last_update < 1:
+                        return
+                    
+                    percentage = min(int((current / total) * 100) if total > 0 else 0, 100)
+                    size_info = f"{self._format_bytes(current)} / {self._format_bytes(total)}"
+                    if speed:
+                        size_info += f" • {speed}"
+                    
+                    download_progress[self.download_id].update({
+                        'progress': max(20, percentage),  # Minimum 20% to show progress
+                        'status': stage,
+                        'size_info': size_info
+                    })
+                    self.last_update = now
+                
+                @staticmethod
+                def _format_bytes(bytes_num: int) -> str:
+                    for unit in ['B', 'KB', 'MB', 'GB']:
+                        if bytes_num < 1024.0:
+                            return f"{bytes_num:.1f} {unit}"
+                        bytes_num /= 1024.0
+                    return f"{bytes_num:.1f} TB"
+            
+            progress_tracker = WebProgressTracker(download_id)
+            
+            # Download the video with selected quality
+            download_progress[download_id]['status'] = f'Downloading {quality} {format_type.upper()}...'
+            download_progress[download_id]['progress'] = 25
+            
+            # Enhanced download with proper quality selection
+            result = await downloader.download_video_enhanced(
+                url, 
+                quality_preference=quality,
+                format_preference=format_type,
+                progress_callback=progress_tracker.update_progress
+            )
+            
+            if result.get('success'):
+                # Upload to private channel
+                download_progress[download_id]['status'] = 'Uploading to private channel...'
+                download_progress[download_id]['progress'] = 80
+                
+                # Send to private channel
+                if Config.TELEGRAM_CHANNEL_ID and bot_status.get("bot_instance"):
+                    try:
+                        bot = bot_status["bot_instance"]
+                        
+                        # Prepare caption with title and description
+                        caption = f"🎬 **{download_progress[download_id]['title']}**\n"
+                        if download_progress[download_id]['description']:
+                            caption += f"\n📝 {download_progress[download_id]['description']}\n"
+                        caption += f"\n🎯 Quality: {quality} | Format: {format_type.upper()}"
+                        caption += f"\n📁 Size: {ProgressTracker._format_bytes(result.get('file_size', 0))}"
+                        caption += f"\n👨‍💻 Downloaded via Web Interface"
+                        
+                        with open(result['file_path'], 'rb') as video_file:
+                            await bot.send_video(
+                                chat_id=Config.TELEGRAM_CHANNEL_ID,
+                                video=video_file,
+                                caption=caption,
+                                parse_mode='Markdown',
+                                supports_streaming=True
+                            )
+                        
+                        # Clean up file
+                        try:
+                            os.unlink(result['file_path'])
+                        except:
+                            pass
+                            
+                    except Exception as e:
+                        logger.warning(f"Failed to send to private channel: {e}")
+                
+                # Mark as completed
+                download_progress[download_id].update({
+                    'progress': 100,
+                    'status': 'Download complete!',
+                    'completed': True,
+                    'result': {
+                        'message': f'Successfully downloaded {download_progress[download_id]["title"]} and sent to private channel.',
+                        'title': download_progress[download_id]['title'],
+                        'quality': quality,
+                        'format': format_type,
+                        'size': ProgressTracker._format_bytes(result.get('file_size', 0))
+                    }
+                })
+                
+            else:
+                raise Exception(result.get('error', 'Download failed'))
+                
+    except Exception as e:
+        logger.error(f"Web download failed: {e}")
+        download_progress[download_id].update({
+            'progress': 0,
+            'status': 'Failed',
+            'completed': True,
+            'error': str(e)
+        })
+
 class SocialMediaDownloader:
     """Enhanced downloader with faster compression and better progress tracking"""
 
@@ -581,7 +1245,7 @@ class SocialMediaDownloader:
                                         filesize = fmt.get('filesize') or fmt.get('filesize_approx') or 0
                                         abr = fmt.get('abr', 0)
                                         duration = info.get('duration', 0)
-                                        
+
                                         # Accurate audio size calculation
                                         if filesize:
                                             actual_size = filesize
@@ -591,7 +1255,7 @@ class SocialMediaDownloader:
                                         else:
                                             # Default estimation for good quality audio
                                             actual_size = (160 * duration * 1000) / 8 if duration else 8 * 1024 * 1024
-                                        
+
                                         fmt['filesize'] = max(actual_size, 2 * 1024 * 1024)  # Minimum 2MB for quality
                                         fmt['filesize_mb'] = fmt['filesize'] / (1024 * 1024)
                                         audio_formats.append(fmt)
@@ -955,6 +1619,85 @@ class SocialMediaDownloader:
             logger.error(f"Download failed: {e}")
             raise Exception(f"Download failed: {e}")
 
+    async def download_video_enhanced(self, url: str, quality_preference: str = "720p", format_preference: str = "mp4", progress_callback=None) -> Dict:
+        """Enhanced download method for web interface with quality preferences"""
+        try:
+            platform = await self.get_platform(url)
+            
+            # Map web interface quality preferences to yt-dlp format strings
+            quality_map = {
+                "1080p": "best[height<=1080][ext=mp4]/bestvideo[height<=1080][ext=mp4]+bestaudio[ext=m4a]/best[height<=1080]",
+                "720p": "best[height<=720][ext=mp4]/bestvideo[height<=720][ext=mp4]+bestaudio[ext=m4a]/best[height<=720]",
+                "480p": "best[height<=480][ext=mp4]/bestvideo[height<=480][ext=mp4]+bestaudio[ext=m4a]/best[height<=480]",
+                "4k": "best[height<=2160][ext=mp4]/bestvideo[height<=2160][ext=mp4]+bestaudio[ext=m4a]/best[height<=2160]",
+            }
+            
+            # Handle audio format preference
+            if format_preference == "mp3":
+                format_string = "bestaudio[ext=m4a]/bestaudio[ext=mp3]/bestaudio/best"
+            elif format_preference == "webm":
+                format_string = f"best[height<={quality_preference[:-1] if quality_preference.endswith('p') else '720'}][ext=webm]/best[ext=webm]"
+            else:
+                format_string = quality_map.get(quality_preference, quality_map["720p"])
+            
+            # Create dummy progress tracker if none provided
+            class DummyProgressTracker:
+                async def update_progress(self, current: int, total: int, speed: str = "", stage: str = "Downloading"):
+                    if progress_callback:
+                        await progress_callback(current, total, speed, stage)
+            
+            dummy_tracker = DummyProgressTracker()
+            
+            # Try enhanced download with proper quality
+            try:
+                if platform == 'youtube':
+                    file_path, metadata = await self._download_youtube_quality(url, format_string, dummy_tracker)
+                else:
+                    file_path, metadata = await self._download_with_enhanced_compression(url, dummy_tracker)
+                
+                if file_path and os.path.exists(file_path):
+                    file_size = os.path.getsize(file_path)
+                    
+                    # Ensure file doesn't exceed 2GB limit
+                    if file_size > Config.MAX_VIDEO_SIZE:
+                        logger.warning(f"File too large: {file_size/1024/1024/1024:.1f} GB > 2GB limit")
+                        try:
+                            os.unlink(file_path)
+                        except:
+                            pass
+                        return {
+                            'success': False,
+                            'error': f'File size ({file_size/1024/1024/1024:.1f} GB) exceeds 2GB limit'
+                        }
+                    
+                    return {
+                        'success': True,
+                        'file_path': file_path,
+                        'file_size': file_size,
+                        'metadata': metadata or {},
+                        'title': metadata.get('title', 'Downloaded Video') if metadata else 'Downloaded Video',
+                        'description': metadata.get('description', '') if metadata else ''
+                    }
+                else:
+                    return {
+                        'success': False,
+                        'error': 'Download failed - no file created'
+                    }
+                    
+            except Exception as e:
+                logger.error(f"Enhanced download failed: {e}")
+                return {
+                    'success': False,
+                    'error': str(e)
+                }
+                
+        except Exception as e:
+            logger.error(f"Download video enhanced failed: {e}")
+            return {
+                'success': False,
+                'error': f'Download failed: {str(e)}'
+            }
+
     async def download_with_api(self, url: str, platform: str, progress_tracker: ProgressTracker) -> Tuple[Optional[str], Optional[Dict]]:
         """Enhanced API download with progress tracking"""
         try:
@@ -1150,7 +1893,7 @@ class SocialMediaDownloader:
                             'description': 'Downloaded with enhanced method',
                             'platform': platform
                         }
-                        
+
                         if os.path.exists(info_file):
                             try:
                                 with open(info_file, 'r', encoding='utf-8') as f:
@@ -1167,7 +1910,7 @@ class SocialMediaDownloader:
                                 logger.info(f"Enhanced filename: {metadata['title'][:30]}_{platform.upper()}{file.suffix}")
                             except Exception as e:
                                 logger.warning(f"Could not read info file: {e}")
-                        
+
                         return str(file), metadata
             else:
                 logger.error(f"Cookie-based download failed: {result.stderr}")
@@ -1844,11 +2587,11 @@ class SocialMediaDownloader:
                 '--output', output_template,
                 '--no-check-certificates'
             ]
-            
+
             # Add format and metadata flags only for video downloads to avoid ffmpeg issues
             if not quality_format.startswith('bestaudio') and 'audio' not in quality_type:
                 download_cmd.extend(['--merge-output-format', 'mp4', '--embed-thumbnail', '--add-metadata'])
-            
+
             download_cmd.append(url)
 
             result = subprocess.run(download_cmd, capture_output=True, text=True, timeout=300, check=False)
@@ -2435,17 +3178,17 @@ class TelegramBot:
                     if format_type == "mp3" or quality_type == "audio" or file_path.endswith(('.mp3', '.m4a', '.aac')):
                         # Enhanced audio caption with metadata
                         audio_caption = f"🎵 **{metadata.get('title', 'Audio Download')}**\n\n"
-                        
+
                         if metadata.get('description'):
                             desc = metadata['description'][:200] + "..." if len(metadata['description']) > 200 else metadata['description']
                             audio_caption += f"📝 **Description:** {desc}\n\n"
-                        
+
                         if metadata.get('uploader'):
                             audio_caption += f"👤 **Artist:** {metadata['uploader']}\n"
-                        
+
                         if metadata.get('platform'):
                             audio_caption += f"🌐 **Platform:** {metadata['platform'].title()}\n"
-                        
+
                         # Safe duration formatting for audio
                         if metadata.get('duration'):
                             try:
@@ -2458,9 +3201,9 @@ class TelegramBot:
                                     audio_caption += f"⏱️ **Duration:** {duration_str}\n"
                             except (ValueError, TypeError, OverflowError):
                                 pass
-                        
+
                         audio_caption += f"\n⚡ **Enhanced Download by {Config.DEVELOPER_CREDIT}**\n🔗 **Source:** {video_url}"
-                        
+
                         await context.bot.send_audio(
                             chat_id=chat_id,
                             audio=video_file,
