@@ -32,30 +32,36 @@ import validators
 import tldextract
 import rfc3987
 
-# Telegram bot with standard imports - temporarily disabled for web interface testing
-# from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Bot, Update
-# from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, ContextTypes, filters
-# from telegram.constants import ParseMode
-# from telegram.error import TelegramError
+# ===== Telegram imports (real if available, else mock) =====
+try:
+    from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Bot, Update
+    from telegram.ext import (
+        Application, CommandHandler, MessageHandler,
+        CallbackQueryHandler, ContextTypes, filters
+    )
+    from telegram.constants import ParseMode
+    from telegram.error import TelegramError
+    TELEGRAM_AVAILABLE = True
+except Exception:
+    TELEGRAM_AVAILABLE = False
 
-# Mock classes for web-only mode
-class MockTelegram:
-    def __init__(self, *args, **kwargs): pass
-    def __call__(self, *args, **kwargs): return self
-    def __getattr__(self, name): return MockTelegram()
+    class MockTelegram:
+        def __init__(self, *args, **kwargs): pass
+        def __call__(self, *args, **kwargs): return self
+        def __getattr__(self, name): return MockTelegram()
 
-InlineKeyboardButton = MockTelegram
-InlineKeyboardMarkup = MockTelegram
-Bot = MockTelegram
-Update = MockTelegram
-Application = MockTelegram
-CommandHandler = MockTelegram
-MessageHandler = MockTelegram
-CallbackQueryHandler = MockTelegram
-ContextTypes = MockTelegram()
-filters = MockTelegram()
-ParseMode = MockTelegram()
-TelegramError = Exception
+    InlineKeyboardButton = MockTelegram
+    InlineKeyboardMarkup = MockTelegram
+    Bot = MockTelegram
+    Update = MockTelegram
+    Application = MockTelegram
+    CommandHandler = MockTelegram
+    MessageHandler = MockTelegram
+    CallbackQueryHandler = MockTelegram
+    ContextTypes = MockTelegram()
+    filters = MockTelegram()
+    ParseMode = MockTelegram()
+    TelegramError = Exception
 
 # Video downloaders and processors
 import yt_dlp
