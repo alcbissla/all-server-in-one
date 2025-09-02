@@ -3,7 +3,7 @@ name = "telegram-bot-social-media-downloader-enhanced"
 version = "2.0.0"
 description = "Enhanced All-in-One Social Media Video Downloader Telegram Bot with Quality Selection - Developed by @Alcboss112"
 authors = ["@Alcboss112 <dev@alcboss112.com>"]
-
+package-mode = false
 [tool.poetry.dependencies]
 python = ">=3.11,<4.0"
 
